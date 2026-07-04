@@ -1,2 +1,19 @@
 buffett-workspace/
 source/
+
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+output/
+
+# Scratch and generated local artifacts
+test.js
+test3.js
+test2.html
+test_marked.html
+test_out.html
+status.txt
+curr_coverage.py
+sp500_tickers.json
+sp500_tickers.txt

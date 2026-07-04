@@ -4,6 +4,7 @@
 
 A collection of Claude Code skills built around Warren Buffett's investment framework.
 
+**Dashboard Command:** Run `python -m src.viewer` to launch the local web viewer.
 
 <video src="bft.mp4" controls width="600"></video>
 

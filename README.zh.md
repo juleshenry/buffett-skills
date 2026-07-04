@@ -4,6 +4,8 @@
 
 基于沃伦·巴菲特投资框架构建的 Claude Code skills 合集。
 
+**Dashboard Command:** 运行 `python -m src.viewer` 启动本地 Web 浏览器。
+
 ## Skills 列表
 
 ### `buffett` — 巴菲特投资思维体系
