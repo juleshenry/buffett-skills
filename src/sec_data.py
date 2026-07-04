@@ -68,6 +68,58 @@ def _strip_html(raw_html: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _normalize_for_matching(text: str) -> str:
+    normalized = text.lower()
+    normalized = normalized.replace("’", "'").replace("‘", "'")
+    normalized = normalized.replace("“", '"').replace("”", '"')
+    normalized = normalized.replace("\xa0", " ")
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized
+
+
+def _marker_positions(text: str, markers: Iterable[str]) -> list[int]:
+    positions: list[int] = []
+    search_text = _normalize_for_matching(text)
+
+    for marker in markers:
+        search_marker = _normalize_for_matching(marker)
+        start = 0
+        while True:
+            idx = search_text.find(search_marker, start)
+            if idx == -1:
+                break
+            positions.append(idx)
+            start = idx + 1
+
+    return sorted(set(positions))
+
+
+def _choose_start_index(text: str, start_markers: Iterable[str]) -> int:
+    positions = _marker_positions(text, start_markers)
+    if not positions:
+        return 0
+
+    text_length = len(text)
+    floor = int(text_length * 0.1)
+    later_positions = [pos for pos in positions if pos >= floor]
+    if later_positions:
+        return later_positions[0]
+
+    return positions[-1]
+
+
+def _choose_end_index(text: str, start_index: int, end_markers: Optional[Iterable[str]]) -> int:
+    if not end_markers:
+        return len(text)
+
+    positions = _marker_positions(text, end_markers)
+    later_positions = [pos for pos in positions if pos > start_index]
+    if later_positions:
+        return later_positions[0]
+
+    return len(text)
+
+
 def fetch_latest_filing_text(ticker: str, form: str = "10-K") -> str:
     metadata = get_latest_filing_metadata(ticker, form=form)
     response = requests.get(metadata["filing_url"], headers=get_sec_headers(), timeout=60)
@@ -84,22 +136,11 @@ def extract_section(
     if not text:
         return ""
 
-    lower_text = text.lower()
-    start_index = None
-    for marker in start_markers:
-        marker_index = lower_text.find(marker.lower())
-        if marker_index != -1 and (start_index is None or marker_index < start_index):
-            start_index = marker_index
+    start_index = _choose_start_index(text, start_markers)
+    end_index = _choose_end_index(text, start_index, end_markers)
 
-    if start_index is None:
-        start_index = 0
-
-    end_index = len(text)
-    if end_markers:
-        for marker in end_markers:
-            marker_index = lower_text.find(marker.lower(), start_index + 1)
-            if marker_index != -1:
-                end_index = min(end_index, marker_index)
+    if end_index <= start_index:
+        end_index = len(text)
 
     section = text[start_index:end_index].strip()
     if max_chars is not None:

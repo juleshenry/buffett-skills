@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "buffett-skills"
+version = "0.1.0"
+description = "Warren Buffett-style investment analysis helpers and evaluators"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "flask>=3.0,<4",
+  "pandas>=2.2,<3",
+  "pandas-datareader>=0.10,<0.11",
+  "requests>=2.31,<3",
+  "python-dateutil>=2.9,<3",
+  "transformers>=4.41,<5",
+  "yfinance>=0.2.54,<0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2,<9",
+]
+sec = [
+  "edgartools>=3.6,<4",
+  "sec-edgar-downloader>=5,<6",
+]
+
+[tool.setuptools]
+py-modules = [
+  "batch_pipeline",
+  "business_moat",
+  "coverage_check",
+  "evaluator_config",
+  "evaluator_thresholds",
+  "financial_metrics",
+  "get_sp500",
+  "industry_playbooks",
+  "investment_philosophy",
+  "management_governance",
+  "risk_behavior",
+  "run",
+  "run_zbh",
+  "sec_data",
+  "thinking_frameworks",
+  "valuation_capital",
+  "viewer",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

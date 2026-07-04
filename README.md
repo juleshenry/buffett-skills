@@ -30,6 +30,27 @@ No need to mention "Buffett" — any investment analysis or business quality que
 
 ## Installation
 
+### Python Environment
+
+Install the Python dependencies with:
+
+```bash
+python3 -m pip install -e .
+```
+
+Optional extras:
+
+```bash
+python3 -m pip install -e .[dev]
+python3 -m pip install -e .[sec]
+```
+
+Run the test suite with:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
 Clone this repo and copy the `skills/buffett` folder into your project:
 
 ```bash
