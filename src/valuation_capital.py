@@ -2,7 +2,7 @@ import json
 import requests
 import yfinance as yf
 from typing import Dict, Any, List, Optional
-from evaluator_config import DEFAULT_INTRINSIC_VALUE_YEARS, DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL, RISK_FREE_RATE_FALLBACK
+from evaluator_config import DEFAULT_INTRINSIC_VALUE_YEARS, DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL, RISK_FREE_RATE_FALLBACK, call_ollama_panel_json
 from sec_data import fetch_filing_keyword_context, fetch_filing_section
 from evaluator_thresholds import (
     CAPITAL_ALLOCATION_STRONG_FCF_TO_DEBT_MIN,
@@ -218,22 +218,8 @@ def analyze_buyback_commentary(ticker: str, commentary: str) -> Dict[str, Any]:
     - "analysis_summary": A one-sentence explanation.
     """
     
-    url = OLLAMA_GENERATE_URL
-    payload = {
-        "model": DEFAULT_OLLAMA_MODEL,
-        "prompt": prompt,
-        "format": "json",
-        "stream": False
-    }
-    
     try:
-        response = requests.post(url, json=payload, timeout=60)
-        response.raise_for_status()
-        data = response.json()
-        
-        # Parse the JSON string returned by Ollama
-        result = json.loads(data.get("response", "{}"))
-        return normalize_buyback_analysis(result)
+        return normalize_buyback_analysis(call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL))
     except Exception as e:
         print(f"Error querying Ollama: {e}")
         return normalize_buyback_analysis({
@@ -542,16 +528,8 @@ class ShareBuybackAnalysis:
         - "mentions_intrinsic_value": A boolean (true or false).
         - "analysis_summary": A one-sentence explanation.
         """
-        import requests
-        import json
-        url = OLLAMA_GENERATE_URL
-        payload = {"model": DEFAULT_OLLAMA_MODEL, "prompt": prompt, "format": "json", "stream": False}
-        
         try:
-            response = requests.post(url, json=payload, timeout=60)
-            response.raise_for_status()
-            data = response.json()
-            return normalize_buyback_analysis(json.loads(data.get("response", "{}")))
+            return normalize_buyback_analysis(call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL))
         except Exception as e:
             return normalize_buyback_analysis({"buyback_strategy": "Unknown", "mentions_intrinsic_value": False, "analysis_summary": f"Failed: {str(e)}"})
 
@@ -604,7 +582,15 @@ class SpecialInvestmentInstruments:
     def __init__(self):
         pass
 
-    def evaluate(self, coupon_rate: float, conversion_discount: float, collateral_coverage: float) -> dict:
+    def evaluate(self, coupon_rate: float | None = None, conversion_discount: float | None = None, collateral_coverage: float | None = None, ticker: str = "") -> dict:
+        if ticker and (coupon_rate is None or conversion_discount is None or collateral_coverage is None):
+            coupon_rate = coupon_rate if coupon_rate is not None else 0.05
+            conversion_discount = conversion_discount if conversion_discount is not None else 0.0
+            collateral_coverage = collateral_coverage if collateral_coverage is not None else 1.0
+            
+        if coupon_rate is None or conversion_discount is None or collateral_coverage is None:
+            raise ValueError("All metrics must be provided")
+
         score = 0
         if coupon_rate >= SPECIAL_INSTRUMENT_COUPON_RATE_MIN:
             score += 1

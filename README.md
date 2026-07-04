@@ -45,6 +45,67 @@ python3 -m pip install -e .[dev]
 python3 -m pip install -e .[sec]
 ```
 
+### Local LLMs With Ollama
+
+This repo talks to a local Ollama server at `http://localhost:11434` by default.
+
+Pull the local models:
+
+```bash
+ollama pull llama3
+ollama pull gemma4:26b
+```
+
+Choose the model for all evaluators with `OLLAMA_MODEL`:
+
+```bash
+export OLLAMA_MODEL=llama3
+python3 -m unittest discover -s tests
+```
+
+```bash
+export OLLAMA_MODEL=gemma
+python3 -m unittest discover -s tests
+```
+
+Supported aliases:
+
+- `llama3` or `ollama3` -> `llama3`
+- `gemma` or `gemma4` -> `gemma4:26b`
+
+You can still pass any explicit Ollama model tag directly, for example `OLLAMA_MODEL=qwen2.5:7b`.
+
+### Panel Of Judges
+
+You can run a three-model local judging panel for structured LLM heuristics.
+
+```bash
+export OLLAMA_PANEL_ENABLED=1
+python3 -m unittest discover -s tests
+```
+
+Default panel:
+
+- `qwen2.5:7b`
+- `llama3`
+- `gemma4:26b`
+
+Or set it explicitly:
+
+```bash
+export OLLAMA_PANEL_MODELS=qwen2.5:7b,llama3,gemma
+```
+
+Add cooling delay between judge calls:
+
+```bash
+export OLLAMA_PANEL_SLEEP_SECONDS=1.5
+```
+
+This sleeps between model calls in the 3-judge panel to reduce back-to-back GPU/CPU load and help avoid overheating.
+
+Current implementation starts with structured JSON judges such as `CircleOfCompetence`, using majority vote plus average confidence.
+
 Run the test suite with:
 
 ```bash

@@ -5,7 +5,7 @@ import re
 from typing import Dict, Any, Optional
 import yfinance as yf
 from transformers import pipeline
-from evaluator_config import DEFAULT_OLLAMA_HOST, DEFAULT_OLLAMA_MODEL
+from evaluator_config import DEFAULT_OLLAMA_HOST, DEFAULT_OLLAMA_MODEL, call_ollama_panel_json, call_ollama_panel_text
 from evaluator_thresholds import (
     ACQUISITION_PURCHASE_MULTIPLE_MAX,
     ACQUISITION_ROIC_MIN,
@@ -51,39 +51,10 @@ class ManagementGovernanceAnalyzer:
 
     def _call_ollama(self, prompt: str, json_format: bool = True, timeout: int = 45) -> Dict[str, Any]:
         """Calls local Ollama API using standard library with timeouts and robust JSON parsing."""
-        url = f"{self.ollama_host}/api/generate"
-        payload = {
-            "model": self.ollama_model,
-            "prompt": prompt,
-            "stream": False
-        }
-        if json_format:
-            payload["format"] = "json"
-
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as response:
-                result = json.loads(response.read().decode("utf-8"))
-                response_text = result.get("response", "")
-                
-                if json_format:
-                    # Robust JSON cleanup: Strip markdown formatting if the model hallucinates it
-                    cleaned_text = re.sub(r"^```json\s*", "", response_text)
-                    cleaned_text = re.sub(r"\s*```$", "", cleaned_text).strip()
-                    try:
-                        return json.loads(cleaned_text)
-                    except json.JSONDecodeError:
-                        return {"error": "Failed to parse Ollama JSON output", "raw_output": response_text}
-                
-                return {"response": response_text}
-                
-        except urllib.error.URLError as e:
-            return {"error": f"Network/Timeout error communicating with Ollama: {str(e)}"}
+            if json_format:
+                return call_ollama_panel_json(prompt, model=self.ollama_model, timeout=timeout, host=self.ollama_host)
+            return call_ollama_panel_text(prompt, model=self.ollama_model, timeout=timeout, host=self.ollama_host)
         except Exception as e:
             return {"error": f"Unexpected error: {str(e)}"}
 
@@ -219,17 +190,11 @@ class ManagementEvaluation:
         return result.get("response", "Analysis failed.")
 
     def _call_ollama(self, prompt: str, json_format: bool = True, timeout: int = 45) -> dict:
-        import requests
-        url = f"{self.ollama_host}/api/generate"
-        payload = {"model": self.ollama_model, "prompt": prompt, "stream": False}
-        if json_format:
-            payload["format"] = "json"
-            
         try:
-            response = requests.post(url, json=payload, timeout=timeout)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
+            if json_format:
+                return call_ollama_panel_json(prompt, model=self.ollama_model, timeout=timeout, host=self.ollama_host)
+            return call_ollama_panel_text(prompt, model=self.ollama_model, timeout=timeout, host=self.ollama_host)
+        except Exception as e:
             return {"error": str(e), "response": f"Error connecting to Ollama: {e}"}
 
     def _fetch_earnings_call_transcript(self, ticker: str) -> str:
@@ -257,11 +222,13 @@ class CorporateCulture:
 
     def evaluate(self, employee_turnover: float | None = None, insider_ownership: float | None = None, restructurings_per_5y: int | None = None, ticker: str = "") -> dict:
         if ticker and (employee_turnover is None or insider_ownership is None or restructurings_per_5y is None):
-            import yfinance as yf
-            info = yf.Ticker(ticker).info
-            insider_ownership = insider_ownership if insider_ownership is not None else info.get("heldPercentInsiders", 0.0)
-            employee_turnover = employee_turnover if employee_turnover is not None else 0.10 # Hard to grab automatically, default to stable
-            restructurings_per_5y = restructurings_per_5y if restructurings_per_5y is not None else 0 # Default to 0 unless analyzed
+            culture_inputs = self._fetch_culture_inputs(ticker)
+            if insider_ownership is None:
+                insider_ownership = culture_inputs["insider_ownership"]
+            if employee_turnover is None:
+                employee_turnover = culture_inputs["employee_turnover"]
+            if restructurings_per_5y is None:
+                restructurings_per_5y = culture_inputs["restructurings_per_5y"]
             
         if employee_turnover is None or insider_ownership is None or restructurings_per_5y is None:
             raise ValueError("All metrics must be provided or fetchable via ticker")
@@ -293,6 +260,57 @@ class CorporateCulture:
         Example helper method. All internal logic should be _ prefixed.
         """
         pass
+
+    def _fetch_culture_inputs(self, ticker: str) -> dict:
+        info = yf.Ticker(ticker).info or {}
+        commentary = self._fetch_culture_commentary(ticker)
+        return {
+            "insider_ownership": float(info.get("heldPercentInsiders") or 0.0),
+            "employee_turnover": self._estimate_employee_turnover(commentary),
+            "restructurings_per_5y": self._count_restructuring_signals(commentary),
+        }
+
+    def _fetch_culture_commentary(self, ticker: str) -> str:
+        keyword_sets = (
+            ("10-K", ("employees", "employee retention", "turnover", "restructuring", "workforce reduction", "layoff")),
+            ("10-Q", ("restructuring", "workforce reduction", "layoff", "retention")),
+            ("8-K", ("restructuring", "workforce reduction", "layoff")),
+        )
+
+        for form, keywords in keyword_sets:
+            try:
+                commentary = fetch_filing_keyword_context(
+                    ticker,
+                    form=form,
+                    keywords=keywords,
+                    context_chars=1800,
+                    max_matches=4,
+                    max_chars=12000,
+                )
+                if commentary:
+                    return commentary
+            except Exception:
+                continue
+
+        return ""
+
+    def _estimate_employee_turnover(self, commentary: str) -> float:
+        text = commentary.lower()
+        percent_match = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:employee\s+)?turnover", text)
+        if percent_match:
+            return float(percent_match.group(1)) / 100.0
+
+        if any(term in text for term in ("high turnover", "elevated attrition", "retention challenges")):
+            return 0.20
+        if any(term in text for term in ("low turnover", "strong retention", "retention remained strong")):
+            return 0.10
+        return 0.15
+
+    def _count_restructuring_signals(self, commentary: str) -> int:
+        text = commentary.lower()
+        keywords = ("restructuring", "workforce reduction", "layoff", "reorganization", "severance")
+        matches = sum(text.count(keyword) for keyword in keywords)
+        return min(matches, 5)
 
 class AcquisitionLogicAcquisitionCriteria:
     """

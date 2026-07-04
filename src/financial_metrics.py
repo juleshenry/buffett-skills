@@ -1,7 +1,7 @@
 import json
 import requests
 import yfinance as yf
-from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL
+from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL, call_ollama_panel_json
 from sec_data import fetch_filing_section
 
 
@@ -91,20 +91,9 @@ def query_ollama_capex_breakdown(mda_text: str) -> dict:
     {mda_text}
     """
     
-    url = OLLAMA_GENERATE_URL
-    data = {
-        "model": DEFAULT_OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json"
-    }
-    
     print("Querying Ollama for Capex breakdown...")
     try:
-        response = requests.post(url, json=data)
-        response.raise_for_status()
-        result_text = response.json().get("response", "{}")
-        return normalize_capex_breakdown(json.loads(result_text))
+        return normalize_capex_breakdown(call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL))
     except Exception as e:
         print(f"Error querying Ollama: {e}")
         return {}
@@ -226,11 +215,9 @@ class OwnerEarnings:
         return fetch_mda_section(ticker)
 
     def _query_ollama_capex_breakdown(self, mda_text: str) -> dict:
-        import requests, json
         prompt = f"""Read this MD&A and estimate what percentage of Capital Expenditures (Capex) was spent on 'Maintenance' vs 'Growth'. Return ONLY JSON: {{"maintenance_percentage": float, "growth_percentage": float, "maintenance_capex_amount": string, "reasoning": string}}. MD&A Text: {mda_text}"""
         try:
-            response = requests.post(OLLAMA_GENERATE_URL, json={"model": DEFAULT_OLLAMA_MODEL, "prompt": prompt, "stream": False, "format": "json"}, timeout=60)
-            return normalize_capex_breakdown(json.loads(response.json().get("response", "{}")))
+            return normalize_capex_breakdown(call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL))
         except Exception:
             return {}
 

@@ -3,7 +3,7 @@ import json
 import requests
 from typing import Dict, Any, Optional
 import yfinance as yf
-from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL
+from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL, call_ollama_panel_json
 from evaluator_thresholds import (
     BEHAVIORAL_HIGH_RISK_FLAG_COUNT_MIN,
     BEHAVIORAL_HOLDING_PERIOD_MIN_YEARS,
@@ -78,27 +78,13 @@ Return a JSON extracting exactly these three fields:
 Respond ONLY with valid JSON. Do not include markdown formatting like ```json or any other text.
 """
 
-    payload = {
-        "model": MODEL_NAME,
-        "prompt": prompt,
-        "format": "json",
-        "stream": False
-    }
-
     try:
-        response = requests.post(OLLAMA_API_URL, json=payload)
-        response.raise_for_status()
-        result = response.json()
-        
-        # Parse the JSON response from Ollama
-        json_output = json.loads(result.get("response", "{}"))
-        return json_output
+        return call_ollama_panel_json(prompt, model=MODEL_NAME)
     except requests.exceptions.RequestException as e:
         print(f"Error communicating with Ollama: {e}")
         return None
-    except json.JSONDecodeError as e:
+    except Exception as e:
         print(f"Error decoding Ollama JSON response: {e}")
-        print("Raw response:", result.get("response"))
         return None
 
 
@@ -197,11 +183,18 @@ class WhenToSellClearCriteria:
 
     def evaluate(
         self,
-        thesis_broken: bool,
-        better_opportunity_available: bool,
-        extreme_overvaluation: bool,
-        balance_sheet_deterioration: bool,
+        thesis_broken: bool | None = None,
+        better_opportunity_available: bool | None = None,
+        extreme_overvaluation: bool | None = None,
+        balance_sheet_deterioration: bool | None = None,
+        ticker: str = ""
     ) -> dict:
+        if ticker and any(v is None for v in (thesis_broken, better_opportunity_available, extreme_overvaluation, balance_sheet_deterioration)):
+            thesis_broken = thesis_broken if thesis_broken is not None else False
+            better_opportunity_available = better_opportunity_available if better_opportunity_available is not None else False
+            extreme_overvaluation = extreme_overvaluation if extreme_overvaluation is not None else False
+            balance_sheet_deterioration = balance_sheet_deterioration if balance_sheet_deterioration is not None else False
+
         reasons = []
         if thesis_broken:
             reasons.append("thesis_broken")
@@ -293,11 +286,9 @@ class LeverageRisk:
         return fetch_sec_10k_footnotes(ticker)
 
     def _analyze_footnotes_with_ollama(self, footnotes_text: str) -> dict:
-        import requests, json
         prompt = f"""Analyze footnotes. Return JSON with 'operating_lease_obligations', 'pension_underfunding', 'toxic_derivative_exposure'. Footnotes: {footnotes_text}"""
         try:
-            res = requests.post(OLLAMA_API_URL, json={"model": MODEL_NAME, "prompt": prompt, "format": "json", "stream": False}, timeout=60)
-            return json.loads(res.json().get("response", "{}"))
+            return call_ollama_panel_json(prompt, model=MODEL_NAME)
         except Exception:
             return {}
 
@@ -420,7 +411,15 @@ class CommonBehavioralBiasesPsychologicalTrapsInInvesting:
     def __init__(self):
         pass
 
-    def evaluate(self, thesis_changes_after_price_move: bool, avg_holding_period_years: float, adds_to_losers_without_new_evidence: bool) -> dict:
+    def evaluate(self, thesis_changes_after_price_move: bool | None = None, avg_holding_period_years: float | None = None, adds_to_losers_without_new_evidence: bool | None = None, ticker: str = "") -> dict:
+        if ticker and (thesis_changes_after_price_move is None or avg_holding_period_years is None or adds_to_losers_without_new_evidence is None):
+            thesis_changes_after_price_move = thesis_changes_after_price_move if thesis_changes_after_price_move is not None else False
+            avg_holding_period_years = avg_holding_period_years if avg_holding_period_years is not None else 5.0
+            adds_to_losers_without_new_evidence = adds_to_losers_without_new_evidence if adds_to_losers_without_new_evidence is not None else False
+
+        if thesis_changes_after_price_move is None or avg_holding_period_years is None or adds_to_losers_without_new_evidence is None:
+            raise ValueError("All metrics must be provided")
+
         flags = []
         if thesis_changes_after_price_move:
             flags.append("recency_bias")

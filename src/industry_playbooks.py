@@ -4,7 +4,7 @@ import urllib.parse
 from typing import Dict, Any, Optional
 import yfinance as yf
 import requests
-from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL
+from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL, call_ollama_panel_json
 from financial_metrics import OwnerEarnings, fetch_deep_financials
 from thinking_frameworks import fetch_company_info
 from sec_data import fetch_filing_keyword_context
@@ -39,27 +39,109 @@ def _description_keyword_ratio(description: str, keywords: tuple[str, ...], cap:
     hits = sum(1 for keyword in keywords if keyword in text)
     return min(cap, hits / max(len(keywords), 1))
 
+
+def fetch_media_metrics(ticker: str) -> dict:
+    company_info = fetch_company_info(ticker)
+    description = company_info.get("description", "")
+    media_context = ""
+
+    for form in ("10-K", "10-Q"):
+        try:
+            media_context = fetch_filing_keyword_context(
+                ticker,
+                form=form,
+                keywords=(
+                    "subscription",
+                    "subscriber",
+                    "advertising",
+                    "advertisement",
+                    "ad revenue",
+                    "churn",
+                    "retention",
+                ),
+                context_chars=1800,
+                max_matches=4,
+                max_chars=9000,
+            )
+            if media_context:
+                break
+        except Exception:
+            continue
+
+    context_text = media_context or description
+    if not context_text:
+        raise ValueError(f"No media-related SEC text available for {ticker}")
+
+    prompt = (
+        "Read the following company disclosure text and estimate a media revenue mix. "
+        "Return JSON with exactly these keys: "
+        "subscription_revenue_ratio (0-1 float), ad_revenue_ratio (0-1 float), "
+        "churn_rate (0-1 float), reasoning (string). "
+        "Use only the text provided. If the text is ambiguous, make conservative estimates but still return numbers.\n\n"
+        f"Disclosure text:\n{context_text}"
+    )
+    result = query_ollama(prompt, context_text)
+    if not result:
+        raise ValueError(f"Failed to parse media metrics for {ticker}")
+
+    return {
+        "subscription_revenue_ratio": result.get("subscription_revenue_ratio"),
+        "ad_revenue_ratio": result.get("ad_revenue_ratio"),
+        "churn_rate": result.get("churn_rate"),
+    }
+
+
+def fetch_insurance_metrics(ticker: str) -> dict:
+    insurance_context = ""
+    for form in ("10-K", "10-Q"):
+        try:
+            insurance_context = fetch_filing_keyword_context(
+                ticker,
+                form=form,
+                keywords=(
+                    "combined ratio",
+                    "loss ratio",
+                    "expense ratio",
+                    "float",
+                    "policyholder float",
+                    "underwriting income",
+                    "premiums earned",
+                    "unearned premium",
+                    "loss reserves",
+                ),
+                context_chars=1800,
+                max_matches=5,
+                max_chars=10000,
+            )
+            if insurance_context:
+                break
+        except Exception:
+            continue
+
+    if not insurance_context:
+        raise ValueError(f"No insurance disclosure context available for {ticker}")
+
+    prompt = (
+        "Read the following insurance company disclosure text and extract underwriting and float metrics. "
+        "Return JSON with exactly these keys: combined_ratio (number), current_float (number), prior_float (number), reasoning (string). "
+        "Use only numbers that are present or directly inferable from the disclosure text.\n\n"
+        f"Disclosure text:\n{insurance_context}"
+    )
+    result = query_ollama(prompt, insurance_context)
+    if not result:
+        raise ValueError(f"Failed to extract insurance metrics for {ticker}")
+
+    return {
+        "combined_ratio": result.get("combined_ratio"),
+        "current_float": result.get("current_float"),
+        "prior_float": result.get("prior_float"),
+    }
+
 def query_ollama(prompt: str, context_text: str, model: str = DEFAULT_OLLAMA_MODEL) -> Optional[Dict[str, Any]]:
     """Query the local Ollama API to analyze text and return structured JSON."""
     full_prompt = f"{prompt}\n\nContext:\n{context_text}"
-    
-    payload = {
-        "model": model,
-        "prompt": full_prompt,
-        "stream": False,
-        "format": "json"
-    }
-    
-    req = urllib.request.Request(
-        OLLAMA_URL, 
-        data=json.dumps(payload).encode('utf-8'),
-        headers={'Content-Type': 'application/json'}
-    )
-    
     try:
-        with urllib.request.urlopen(req, timeout=120) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            return json.loads(result.get("response", "{}"))
+        return call_ollama_panel_json(full_prompt, model=model, timeout=120)
     except Exception as e:
         print(f"Error querying Ollama: {e}")
         return None
@@ -181,10 +263,8 @@ class Insurance:
         return fetch_industry_data(ticker, industry_type)
 
     def _query_ollama(self, prompt: str, context: str) -> dict:
-        import requests, json
         try:
-            res = requests.post(OLLAMA_URL, json={"model": DEFAULT_OLLAMA_MODEL, "prompt": prompt, "format": "json", "stream": False}, timeout=60)
-            return json.loads(res.json().get("response", "{}"))
+            return call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL)
         except Exception:
             return {}
 
@@ -196,7 +276,14 @@ class UnderwritingDiscipline:
     def __init__(self):
         pass
 
-    def evaluate(self, combined_ratio: float) -> dict:
+    def evaluate(self, combined_ratio: float | None = None, ticker: str = "") -> dict:
+        if ticker and combined_ratio is None:
+            metrics = fetch_insurance_metrics(ticker)
+            combined_ratio = metrics.get("combined_ratio")
+
+        if combined_ratio is None:
+            raise ValueError("combined_ratio is required")
+
         if combined_ratio < UNDERWRITING_EXCELLENT_COMBINED_RATIO_MAX:
             assessment = "excellent"
         elif combined_ratio < UNDERWRITING_DISCIPLINED_COMBINED_RATIO_MAX:
@@ -223,7 +310,25 @@ class InsuranceFloat:
     def __init__(self):
         pass
 
-    def evaluate(self, current_float: float, prior_float: float, combined_ratio: float) -> dict:
+    def evaluate(
+        self,
+        current_float: float | None = None,
+        prior_float: float | None = None,
+        combined_ratio: float | None = None,
+        ticker: str = "",
+    ) -> dict:
+        if ticker and (current_float is None or prior_float is None or combined_ratio is None):
+            metrics = fetch_insurance_metrics(ticker)
+            if current_float is None:
+                current_float = metrics.get("current_float")
+            if prior_float is None:
+                prior_float = metrics.get("prior_float")
+            if combined_ratio is None:
+                combined_ratio = metrics.get("combined_ratio")
+
+        if current_float is None or prior_float is None or combined_ratio is None:
+            raise ValueError("current_float, prior_float, and combined_ratio are required")
+
         float_growth = current_float - prior_float
         if float_growth > 0 and combined_ratio < UNDERWRITING_DISCIPLINED_COMBINED_RATIO_MAX:
             quality = "valuable"
@@ -266,10 +371,8 @@ class Banking:
         return fetch_industry_data(ticker, industry_type)
 
     def _query_ollama(self, prompt: str, context: str) -> dict:
-        import requests, json
         try:
-            res = requests.post(OLLAMA_URL, json={"model": DEFAULT_OLLAMA_MODEL, "prompt": prompt, "format": "json", "stream": False}, timeout=60)
-            return json.loads(res.json().get("response", "{}"))
+            return call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL)
         except Exception:
             return {}
 
@@ -323,11 +426,14 @@ class MediaPublishing:
 
     def evaluate(self, subscription_revenue_ratio: float | None = None, ad_revenue_ratio: float | None = None, churn_rate: float | None = None, ticker: str = "") -> dict:
         if ticker and (subscription_revenue_ratio is None or ad_revenue_ratio is None or churn_rate is None):
-            # Without NLP parsing of 10-K, default to a balanced media model
-            subscription_revenue_ratio = subscription_revenue_ratio if subscription_revenue_ratio is not None else 0.40
-            ad_revenue_ratio = ad_revenue_ratio if ad_revenue_ratio is not None else 0.40
-            churn_rate = churn_rate if churn_rate is not None else 0.05
-            
+            metrics = fetch_media_metrics(ticker)
+            if subscription_revenue_ratio is None:
+                subscription_revenue_ratio = metrics.get("subscription_revenue_ratio")
+            if ad_revenue_ratio is None:
+                ad_revenue_ratio = metrics.get("ad_revenue_ratio")
+            if churn_rate is None:
+                churn_rate = metrics.get("churn_rate")
+             
         if subscription_revenue_ratio is None or ad_revenue_ratio is None or churn_rate is None:
             raise ValueError("All metrics must be provided or fetchable via ticker")
 

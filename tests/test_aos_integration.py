@@ -22,18 +22,13 @@ class TestAOSIntegration(unittest.TestCase):
         self.ticker = "AOS"
         self.company_name = "A. O. Smith Corporation"
     
-    @patch('requests.post')
-    def test_01_thinking_frameworks(self, mock_post):
-        # Mock Ollama response
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "response": json.dumps({
-                "inside_circle": True,
-                "confidence": 85,
-                "explanation": "AOS manufactures water heaters and boilers, a very straightforward business."
-            })
+    @patch('thinking_frameworks.call_ollama_panel_json')
+    def test_01_thinking_frameworks(self, mock_panel_call):
+        mock_panel_call.return_value = {
+            "inside_circle": True,
+            "confidence": 85,
+            "explanation": "AOS manufactures water heaters and boilers, a very straightforward business."
         }
-        mock_post.return_value = mock_response
 
         with patch('thinking_frameworks.fetch_company_info') as mock_info:
             mock_info.return_value = {
@@ -81,16 +76,12 @@ class TestAOSIntegration(unittest.TestCase):
         self.assertIn("benchmark_cagr", result)
         self.assertIn("outperformed_benchmark", result)
 
-    @patch('requests.post')
-    def test_03_business_moat(self, mock_post):
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "response": json.dumps({
-                "moat_type": "Brand",
-                "justification": "AOS has a very strong brand presence in the water heater market."
-            })
+    @patch('business_moat.call_ollama_panel_json')
+    def test_03_business_moat(self, mock_panel_call):
+        mock_panel_call.return_value = {
+            "moat_type": "Brand",
+            "justification": "AOS has a very strong brand presence in the water heater market."
         }
-        mock_post.return_value = mock_response
 
         products = ["Water Heaters", "Boilers"]
         competitors = ["Rheem", "Bradford White"]
@@ -125,18 +116,14 @@ class TestAOSIntegration(unittest.TestCase):
 
         self.assertEqual(result_str, "Explicit-input management analysis.")
 
-    @patch('requests.post')
-    def test_05_financial_metrics(self, mock_post):
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "response": json.dumps({
-                "maintenance_capex_percentage": 70,
-                "growth_capex_percentage": 30,
-                "extracted_numbers": ["$50M maintenance", "$20M growth"],
-                "reasoning": "Based on MD&A text."
-            })
+    @patch('financial_metrics.call_ollama_panel_json')
+    def test_05_financial_metrics(self, mock_panel_call):
+        mock_panel_call.return_value = {
+            "maintenance_capex_percentage": 70,
+            "growth_capex_percentage": 30,
+            "extracted_numbers": ["$50M maintenance", "$20M growth"],
+            "reasoning": "Based on MD&A text."
         }
-        mock_post.return_value = mock_response
         
         with patch('financial_metrics.fetch_mda_section') as mock_mda:
             mock_mda.return_value = "We spent a lot on maintenance."
@@ -145,17 +132,13 @@ class TestAOSIntegration(unittest.TestCase):
             
             self.assertEqual(result.get("maintenance_percentage"), 70)
 
-    @patch('requests.post')
-    def test_06_valuation_capital(self, mock_post):
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "response": json.dumps({
-                "systematic_buybacks": True,
-                "intrinsic_value_mentioned": True,
-                "analysis": "Management explicitly states they only buy below intrinsic value."
-            })
+    @patch('valuation_capital.call_ollama_panel_json')
+    def test_06_valuation_capital(self, mock_panel_call):
+        mock_panel_call.return_value = {
+            "systematic_buybacks": True,
+            "intrinsic_value_mentioned": True,
+            "analysis": "Management explicitly states they only buy below intrinsic value."
         }
-        mock_post.return_value = mock_response
 
         # The valuation capital script requires specific keys to run
         with patch('valuation_capital.fetch_financial_data') as mock_fin:
@@ -175,18 +158,14 @@ class TestAOSIntegration(unittest.TestCase):
             self.assertTrue(result["capital_allocation_analysis"]["mentions_intrinsic_value"])
             self.assertEqual(result["capital_allocation_analysis"]["buyback_strategy"], "Systematic")
 
-    @patch('requests.post')
-    def test_07_risk_behavior(self, mock_post):
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "response": json.dumps({
-                "total_operating_lease_obligations": 50000000,
-                "pension_plan_underfunding_amount": 0,
-                "toxic_derivative_exposure": "None",
-                "summary": "Clean balance sheet."
-            })
+    @patch('risk_behavior.call_ollama_panel_json')
+    def test_07_risk_behavior(self, mock_panel_call):
+        mock_panel_call.return_value = {
+            "total_operating_lease_obligations": 50000000,
+            "pension_plan_underfunding_amount": 0,
+            "toxic_derivative_exposure": "None",
+            "summary": "Clean balance sheet."
         }
-        mock_post.return_value = mock_response
         
         with patch('risk_behavior.fetch_sec_10k_footnotes') as mock_fetch:
             mock_fetch.return_value = "Standard lease footnotes for AOS."

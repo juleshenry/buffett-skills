@@ -7,11 +7,12 @@ from investment_philosophy import fetch_price_comparison_data
 from sec_data import fetch_filing_section
 from valuation_capital import fetch_risk_free_rate
 from evaluator_config import (
+    call_ollama_panel_json,
+    call_ollama_panel_text,
     DEFAULT_CIRCLE_OF_COMPETENCE_TEMPERATURE,
     DEFAULT_INVERSION_TEMPERATURE,
     DEFAULT_MR_MARKET_PERIOD,
     DEFAULT_OLLAMA_MODEL,
-    OLLAMA_GENERATE_URL,
 )
 from evaluator_thresholds import (
     INDEPENDENT_THINKING_EVIDENCE_MIN,
@@ -97,31 +98,44 @@ class CircleOfCompetence:
         - explanation (string, under 40 words)
         Judge whether the business is simple enough for a generalist value investor to understand.
         """
-        url = OLLAMA_GENERATE_URL
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-            "options": {"temperature": DEFAULT_CIRCLE_OF_COMPETENCE_TEMPERATURE}
+        aggregated = call_ollama_panel_json(
+            prompt,
+            model=model,
+            options={"temperature": DEFAULT_CIRCLE_OF_COMPETENCE_TEMPERATURE},
+            aggregator=self._aggregate_circle_results,
+        )
+        if aggregated:
+            return aggregated
+
+        return {
+            "inside_circle": False,
+            "confidence": 0,
+            "explanation": "Failed to evaluate: no valid panel responses"
         }
 
-        try:
-            response = requests.post(url, json=payload, timeout=60)
-            response.raise_for_status()
-            result = json.loads(response.json().get("response", "{}"))
-            confidence = int(result.get("confidence", 0) or 0)
-            return {
-                "inside_circle": bool(result.get("inside_circle", False)),
-                "confidence": max(0, min(confidence, 100)),
-                "explanation": result.get("explanation", "")
-            }
-        except Exception as e:
-            return {
-                "inside_circle": False,
-                "confidence": 0,
-                "explanation": f"Failed to evaluate: {e}"
-            }
+    def _aggregate_circle_results(self, results: list[dict]) -> dict:
+        valid_results = [result for result in results if result]
+        if not valid_results:
+            return {}
+
+        inside_votes = sum(1 for result in valid_results if bool(result.get("inside_circle", False)))
+        inside_circle = inside_votes >= ((len(valid_results) // 2) + 1)
+        confidences = [int(result.get("confidence", 0) or 0) for result in valid_results]
+        explanations = [
+            result.get("explanation", "")
+            for result in valid_results
+            if bool(result.get("inside_circle", False)) == inside_circle and result.get("explanation")
+        ]
+        return {
+            "inside_circle": inside_circle,
+            "confidence": max(0, min(round(sum(confidences) / len(confidences)), 100)),
+            "explanation": explanations[0] if explanations else valid_results[0].get("explanation", ""),
+            "panel_models": [result.get("_panel_model") for result in valid_results if result.get("_panel_model")],
+            "panel_vote_split": {
+                "inside_circle": inside_votes,
+                "outside_circle": len(valid_results) - inside_votes,
+            },
+        }
 
     def _helper_method(self):
         pass
@@ -162,20 +176,12 @@ class Inversion:
         Format as a brief, punchy bulleted list. No intro, no fluff.
         """
 
-        url = OLLAMA_GENERATE_URL
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": DEFAULT_INVERSION_TEMPERATURE} # Low temp for analytical focus
-        }
-        
-        try:
-            response = requests.post(url, json=payload)
-            response.raise_for_status()
-            return response.json().get("response", "No response generated.")
-        except Exception as e:
-            return f"Error connecting to Ollama: {e}"
+        result = call_ollama_panel_text(
+            prompt,
+            model=model,
+            options={"temperature": DEFAULT_INVERSION_TEMPERATURE},
+        )
+        return result.get("response", "No response generated.")
 
     def _helper_method(self):
         pass
@@ -279,7 +285,16 @@ class MungersLatticeOfMentalModels:
     def __init__(self):
         pass
 
-    def evaluate(self, economics_score: float, psychology_score: float, accounting_score: float) -> dict:
+    def evaluate(self, economics_score: float | None = None, psychology_score: float | None = None, accounting_score: float | None = None, ticker: str = "") -> dict:
+        if ticker and (economics_score is None or psychology_score is None or accounting_score is None):
+            # This is highly qualitative. For a fully automated pipeline, we supply default middle-ground scores.
+            economics_score = economics_score if economics_score is not None else 0.5
+            psychology_score = psychology_score if psychology_score is not None else 0.5
+            accounting_score = accounting_score if accounting_score is not None else 0.5
+
+        if economics_score is None or psychology_score is None or accounting_score is None:
+            raise ValueError("All metrics must be provided")
+
         average_score = (economics_score + psychology_score + accounting_score) / 3
 
         assessment = "narrow"
@@ -306,7 +321,15 @@ class IndependentThinking:
     def __init__(self):
         pass
 
-    def evaluate(self, thesis_differs_from_consensus: bool, evidence_strength: float, valuation_gap: float) -> dict:
+    def evaluate(self, thesis_differs_from_consensus: bool | None = None, evidence_strength: float | None = None, valuation_gap: float | None = None, ticker: str = "") -> dict:
+        if ticker and (thesis_differs_from_consensus is None or evidence_strength is None or valuation_gap is None):
+            thesis_differs_from_consensus = thesis_differs_from_consensus if thesis_differs_from_consensus is not None else False
+            evidence_strength = evidence_strength if evidence_strength is not None else 0.5
+            valuation_gap = valuation_gap if valuation_gap is not None else 0.0
+
+        if thesis_differs_from_consensus is None or evidence_strength is None or valuation_gap is None:
+            raise ValueError("All metrics must be provided")
+
         score = 0
         if thesis_differs_from_consensus:
             score += 1
@@ -383,7 +406,15 @@ class PatienceAsEdge:
     def __init__(self):
         pass
 
-    def evaluate(self, avg_holding_period_years: float, turnover_ratio: float, forced_activity: bool) -> dict:
+    def evaluate(self, avg_holding_period_years: float | None = None, turnover_ratio: float | None = None, forced_activity: bool | None = None, ticker: str = "") -> dict:
+        if ticker and (avg_holding_period_years is None or turnover_ratio is None or forced_activity is None):
+            avg_holding_period_years = avg_holding_period_years if avg_holding_period_years is not None else 5.0
+            turnover_ratio = turnover_ratio if turnover_ratio is not None else 0.20
+            forced_activity = forced_activity if forced_activity is not None else False
+            
+        if avg_holding_period_years is None or turnover_ratio is None or forced_activity is None:
+            raise ValueError("All metrics must be provided")
+
         score = 0
         if avg_holding_period_years >= PATIENCE_HOLDING_PERIOD_MIN_YEARS:
             score += 1

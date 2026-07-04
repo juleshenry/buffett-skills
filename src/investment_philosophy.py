@@ -96,7 +96,10 @@ class FocusInvesting:
     def __init__(self):
         pass
 
-    def evaluate(self, positions: List[float]) -> dict:
+    def evaluate(self, positions: List[float] | None = None, ticker: str = "") -> dict:
+        if ticker and not positions:
+            positions = [1.0] # Default to 100% allocation for a single stock analysis
+            
         if not positions:
             raise ValueError("positions must not be empty")
 

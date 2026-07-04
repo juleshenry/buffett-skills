@@ -22,6 +22,10 @@ END_TO_END_EVALUATOR_CALLS = {
     "ShareBuybackAnalysis.evaluate",
 }
 
+PUBLIC_MARKET_CALLS = {
+    "yf.download",
+}
+
 
 def get_evaluate_method(class_node):
     for node in class_node.body:
@@ -61,6 +65,7 @@ def uses_end_to_end_evidence(function_node):
             return True
         if call_name in {
             "yf.Ticker",
+            *PUBLIC_MARKET_CALLS,
             "requests.get",
             "requests.post",
             "urllib.request.urlopen",

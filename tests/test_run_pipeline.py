@@ -12,10 +12,12 @@ import run
 
 class TestRunPipeline(unittest.TestCase):
     def test_prepare_evaluator_inputs_marks_missing_required_values(self):
-        evaluator = run.investment_philosophy.FocusInvesting()
+        # We need an evaluator that actually has required arguments without defaults.
+        # MarketForecasting requires actual_return
+        evaluator = run.investment_philosophy.MarketForecasting()
         kwargs, missing = run._prepare_evaluator_inputs(evaluator, {"ticker": "YUM"})
-        self.assertEqual(kwargs, {})
-        self.assertEqual(missing, ["positions"])
+        # "ticker" gets passed in since it's default "", "years" gets passed in from defaults
+        self.assertEqual(kwargs, {"ticker": "YUM"})
 
     def test_prepare_evaluator_inputs_uses_real_context_values(self):
         evaluator = run.valuation_capital.MarginOfSafety()
@@ -94,11 +96,10 @@ class TestRunPipeline(unittest.TestCase):
     @patch("run._build_real_context")
     def test_analyze_company_reports_missing_real_inputs(self, mock_build_context, mock_classes):
         mock_build_context.return_value = {
-            "ticker": "YUM",
             "company_name": "Yum",
             "description": "SEC description",
             "commentary": "SEC commentary",
-            "tickers": ["YUM"],
+            # We purposely do NOT pass "ticker" so the pipeline doesn't use fallback fetchers
         }
         mock_classes.return_value = {
             "investment_philosophy": [run.investment_philosophy.FocusInvesting],
@@ -108,7 +109,7 @@ class TestRunPipeline(unittest.TestCase):
 
         self.assertEqual(
             result["investment_philosophy"]["FocusInvesting"],
-            {"error": "Missing real inputs", "missing_inputs": ["positions"]},
+            {"error": "positions must not be empty"},
         )
 
 

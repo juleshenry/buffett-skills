@@ -18,7 +18,12 @@ from thinking_frameworks import IndependentThinking, LongtermOrientation, MrMark
 from valuation_capital import CapitalAllocationAnalysis, MarginOfSafety, TheRelationshipBetweenPurchasePriceAndIntrinsicValue
 from valuation_capital import DividendsRetainedEarningsAndTaxEfficiency
 from valuation_capital import SpecialInvestmentInstruments
-from evaluator_config import DEFAULT_INTRINSIC_VALUE_YEARS
+from evaluator_config import (
+    DEFAULT_INTRINSIC_VALUE_YEARS,
+    _resolve_ollama_model,
+    aggregate_panel_judgment,
+    call_ollama_panel_json,
+)
 from sec_data import extract_keyword_context
 from risk_behavior import ValueTraps, WhenToSellClearCriteria
 from risk_behavior import CommonBehavioralBiasesPsychologicalTrapsInInvesting, DerivativesRisk
@@ -34,6 +39,59 @@ from valuation_capital import normalize_buyback_analysis
 
 
 class TestMinimalHeuristics(unittest.TestCase):
+    def test_ollama_model_aliases(self):
+        self.assertEqual(_resolve_ollama_model("llama3"), "llama3")
+        self.assertEqual(_resolve_ollama_model("ollama3"), "llama3")
+        self.assertEqual(_resolve_ollama_model("gemma"), "gemma4:26b")
+        self.assertEqual(_resolve_ollama_model("gemma4"), "gemma4:26b")
+
+    def test_panel_judgment_aggregates_majority_and_average_confidence(self):
+        result = aggregate_panel_judgment([
+            {"inside_circle": True, "confidence": 80, "explanation": "Simple business.", "_panel_model": "qwen2.5:7b"},
+            {"inside_circle": True, "confidence": 70, "explanation": "Understandable.", "_panel_model": "llama3"},
+            {"inside_circle": False, "confidence": 40, "explanation": "Too complex.", "_panel_model": "gemma4:26b"},
+        ])
+        self.assertTrue(result["inside_circle"])
+        self.assertEqual(result["confidence"], 63)
+        self.assertEqual(result["panel_vote_split"]["inside_circle"], 2)
+
+    @patch("thinking_frameworks.fetch_filing_section")
+    @patch("thinking_frameworks.call_ollama_panel_json")
+    def test_circle_of_competence_uses_panel_of_judges(self, mock_panel_call, mock_fetch_section):
+        mock_fetch_section.return_value = "Makes branded beverages and distributes them globally."
+        mock_panel_call.return_value = {
+            "inside_circle": True,
+            "confidence": 63,
+            "explanation": "Simple business.",
+            "panel_vote_split": {"inside_circle": 2, "outside_circle": 1},
+        }
+
+        result = thinking_frameworks.CircleOfCompetence().evaluate("KO")
+
+        self.assertTrue(result["inside_circle"])
+        self.assertEqual(result["confidence"], 63)
+        self.assertEqual(result["panel_vote_split"]["inside_circle"], 2)
+
+    @patch("evaluator_config.time.sleep")
+    @patch("evaluator_config.requests.post")
+    @patch.dict(os.environ, {"OLLAMA_PANEL_SLEEP_SECONDS": "0.25"}, clear=False)
+    def test_call_ollama_panel_json_sleeps_between_models(self, mock_post, mock_sleep):
+        responses = [
+            {"response": '{"inside_circle": true, "confidence": 80, "explanation": "A"}'},
+            {"response": '{"inside_circle": true, "confidence": 70, "explanation": "B"}'},
+            {"response": '{"inside_circle": false, "confidence": 40, "explanation": "C"}'},
+        ]
+        mock_post.side_effect = [MagicMock(json=MagicMock(return_value=payload), raise_for_status=MagicMock()) for payload in responses]
+
+        result = call_ollama_panel_json(
+            "prompt",
+            model="qwen2.5:7b",
+            aggregator=aggregate_panel_judgment,
+        )
+
+        self.assertTrue(result["inside_circle"])
+        self.assertEqual(mock_sleep.call_count, 2)
+
     def test_margin_of_safety(self):
         result = MarginOfSafety().evaluate(intrinsic_value=100.0, market_price=70.0)
         self.assertAlmostEqual(result["margin_of_safety"], 0.30)
@@ -231,10 +289,28 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["durability_score"], 3)
         self.assertEqual(result["durability_assessment"], "strong")
 
+    @patch("business_moat.fetch_durability_metrics")
+    def test_durability_of_competitive_advantage_fetches_real_company_data(self, mock_fetch_metrics):
+        mock_fetch_metrics.return_value = {
+            "gross_margin_trend": 0.02,
+            "market_share_trend": 0.01,
+            "return_on_capital": 0.15,
+        }
+        result = TheDurabilityOfCompetitiveAdvantage().evaluate(ticker="AAPL")
+        self.assertEqual(result["durability_assessment"], "strong")
+        mock_fetch_metrics.assert_called_once_with("AAPL")
+
     def test_underwriting_discipline(self):
         result = UnderwritingDiscipline().evaluate(combined_ratio=97.0)
         self.assertEqual(result["underwriting_discipline"], "disciplined")
         self.assertTrue(result["profitable_underwriting"])
+
+    @patch("industry_playbooks.fetch_insurance_metrics")
+    def test_underwriting_discipline_fetches_real_company_data(self, mock_fetch_metrics):
+        mock_fetch_metrics.return_value = {"combined_ratio": 94.0}
+        result = UnderwritingDiscipline().evaluate(ticker="CB")
+        self.assertEqual(result["underwriting_discipline"], "excellent")
+        mock_fetch_metrics.assert_called_once_with("CB")
 
     def test_insurance_float(self):
         result = InsuranceFloat().evaluate(
@@ -244,6 +320,17 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
         self.assertEqual(result["float_growth"], 200.0)
         self.assertEqual(result["float_quality"], "valuable")
+
+    @patch("industry_playbooks.fetch_insurance_metrics")
+    def test_insurance_float_fetches_real_company_data(self, mock_fetch_metrics):
+        mock_fetch_metrics.return_value = {
+            "current_float": 1200.0,
+            "prior_float": 1000.0,
+            "combined_ratio": 96.0,
+        }
+        result = InsuranceFloat().evaluate(ticker="CB")
+        self.assertEqual(result["float_quality"], "valuable")
+        mock_fetch_metrics.assert_called_once_with("CB")
 
     def test_focus_investing(self):
         result = FocusInvesting().evaluate([40.0, 25.0, 15.0, 10.0, 10.0])
@@ -526,6 +613,22 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["culture_score"], 3)
         self.assertEqual(result["culture_assessment"], "strong")
 
+    @patch("management_governance.yf.Ticker")
+    @patch("management_governance.fetch_filing_keyword_context")
+    def test_corporate_culture_fetches_real_inputs_for_ticker(self, mock_fetch_context, mock_ticker):
+        mock_ticker.return_value.info = {"heldPercentInsiders": 0.06}
+        mock_fetch_context.return_value = (
+            "Employee turnover remained 10%. Retention remained strong. "
+            "The company announced a restructuring and a reorganization program."
+        )
+
+        result = CorporateCulture().evaluate(ticker="AAPL")
+
+        self.assertEqual(result["insider_ownership"], 0.06)
+        self.assertEqual(result["employee_turnover"], 0.10)
+        self.assertEqual(result["restructurings_per_5y"], 2)
+        self.assertEqual(result["culture_assessment"], "stable")
+
     def test_acquisition_logic(self):
         result = AcquisitionLogicAcquisitionCriteria().evaluate(
             purchase_multiple=10.0,
@@ -610,6 +713,17 @@ class TestMinimalHeuristics(unittest.TestCase):
             churn_rate=0.08,
         )
         self.assertEqual(result["media_quality"], "strong")
+
+    @patch("industry_playbooks.fetch_media_metrics")
+    def test_media_publishing_fetches_real_company_data(self, mock_fetch_metrics):
+        mock_fetch_metrics.return_value = {
+            "subscription_revenue_ratio": 0.7,
+            "ad_revenue_ratio": 0.3,
+            "churn_rate": 0.08,
+        }
+        result = MediaPublishing().evaluate(ticker="NYT")
+        self.assertEqual(result["media_quality"], "strong")
+        mock_fetch_metrics.assert_called_once_with("NYT")
 
     def test_energy_utilities(self):
         result = EnergyUtilities().evaluate(

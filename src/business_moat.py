@@ -7,7 +7,7 @@ import yfinance as yf
 import pandas_datareader.data as web
 import datetime
 from typing import Dict, List, Any, Optional
-from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL
+from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL, call_ollama_panel_json
 from evaluator_thresholds import (
     BUSINESS_MODEL_ASSET_HEAVY_CAPITAL_INTENSITY_MIN,
     BUSINESS_MODEL_ASSET_HEAVY_GROSS_MARGIN_MAX,
@@ -80,24 +80,70 @@ def fetch_goodwill_metrics(ticker: str) -> dict:
         "return_on_tangible_assets": return_on_tangible_assets,
     }
 
+
+def fetch_durability_metrics(ticker: str) -> dict:
+    margins_df = fetch_historical_margins(ticker)
+    if margins_df.empty:
+        raise ValueError(f"No historical margins available for {ticker}")
+
+    sorted_margins = margins_df.sort_values("Year")
+    gross_margin_trend = None
+    last_two_margins = sorted_margins["Gross_Margin"].dropna().tail(2)
+    if len(last_two_margins) == 2:
+        gross_margin_trend = float(last_two_margins.iloc[-1] - last_two_margins.iloc[-2])
+
+    company_info = yf.Ticker(ticker).info or {}
+    company_revenue_growth = company_info.get("revenueGrowth")
+
+    competitor_growth_rates: list[float] = []
+    try:
+        competitor_names = infer_business_details(ticker).get("competitors", [])
+    except Exception:
+        competitor_names = []
+
+    for competitor in competitor_names[:5]:
+        try:
+            competitor_info = yf.Ticker(str(competitor)).info or {}
+            revenue_growth = competitor_info.get("revenueGrowth")
+            if revenue_growth is not None:
+                competitor_growth_rates.append(float(revenue_growth))
+        except Exception:
+            continue
+
+    market_share_trend = None
+    if company_revenue_growth is not None:
+        company_revenue_growth = float(company_revenue_growth)
+        if competitor_growth_rates:
+            competitor_growth_rates.sort()
+            midpoint = len(competitor_growth_rates) // 2
+            median_competitor_growth = competitor_growth_rates[midpoint]
+            market_share_trend = company_revenue_growth - median_competitor_growth
+        else:
+            market_share_trend = company_revenue_growth
+
+    return_on_capital = None
+    earnings = _get_statement_value(yf.Ticker(ticker).income_stmt, ("Operating Income", "Net Income"))
+    balance_sheet = yf.Ticker(ticker).balance_sheet
+    total_debt = _get_statement_value(balance_sheet, ("Total Debt", "Long Term Debt", "Long Term Debt And Capital Lease Obligation"))
+    equity = _get_statement_value(balance_sheet, ("Stockholders Equity", "Total Equity Gross Minority Interest", "Common Stock Equity"))
+    cash = _get_statement_value(balance_sheet, ("Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments", "Cash And Short Term Investments"))
+    if None not in (earnings, total_debt, equity):
+        invested_capital = total_debt + equity - (cash or 0.0)
+        if invested_capital > 0:
+            return_on_capital = earnings / invested_capital
+
+    return {
+        "gross_margin_trend": gross_margin_trend,
+        "market_share_trend": market_share_trend,
+        "return_on_capital": return_on_capital,
+    }
+
 def _query_ollama_json(prompt: str, model: str = DEFAULT_MODEL) -> dict:
     """Helper function to query the local Ollama API and return parsed JSON."""
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json"
-    }
-    
     try:
-        response = requests.post(OLLAMA_API_URL, json=payload, timeout=60)
-        response.raise_for_status()
-        data = response.json()
-        return json.loads(data.get("response", "{}"))
-    except requests.exceptions.RequestException as e:
+        return call_ollama_panel_json(prompt, model=model)
+    except Exception as e:
         logger.error(f"Network error communicating with Ollama: {e}")
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse JSON from Ollama response: {e}")
     
     return {}
 
@@ -376,20 +422,9 @@ class EconomicMoat:
         return self._query_ollama_json(prompt, model)
 
     def _query_ollama_json(self, prompt: str, model: str) -> dict:
-        import requests
-        import json
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json"
-        }
         try:
-            response = requests.post(self.OLLAMA_API_URL, json=payload, timeout=60)
-            response.raise_for_status()
-            data = response.json()
-            return json.loads(data.get("response", "{}"))
-        except Exception as e:
+            return call_ollama_panel_json(prompt, model=model)
+        except Exception:
             return {}
 
 class BusinessModelTypes:
@@ -511,7 +546,22 @@ class TheDurabilityOfCompetitiveAdvantage:
     def __init__(self):
         pass
 
-    def evaluate(self, gross_margin_trend: float, market_share_trend: float, return_on_capital: float) -> dict:
+    def evaluate(
+        self,
+        gross_margin_trend: Optional[float] = None,
+        market_share_trend: Optional[float] = None,
+        return_on_capital: Optional[float] = None,
+        ticker: str = "",
+    ) -> dict:
+        if ticker and any(value is None for value in (gross_margin_trend, market_share_trend, return_on_capital)):
+            metrics = fetch_durability_metrics(ticker)
+            gross_margin_trend = metrics["gross_margin_trend"]
+            market_share_trend = metrics["market_share_trend"]
+            return_on_capital = metrics["return_on_capital"]
+
+        if gross_margin_trend is None or market_share_trend is None or return_on_capital is None:
+            raise ValueError("gross_margin_trend, market_share_trend, and return_on_capital are required")
+
         score = 0
         if gross_margin_trend >= 0:
             score += 1
