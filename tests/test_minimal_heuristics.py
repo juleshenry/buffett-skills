@@ -58,6 +58,19 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertTrue(result["is_value_trap"])
         self.assertIn("cheap_multiple", result["risk_flags"])
 
+    @patch("risk_behavior.fetch_value_trap_metrics")
+    def test_value_traps_fetch_real_metrics_for_ticker(self, mock_fetch_metrics):
+        mock_fetch_metrics.return_value = {
+            "pe_ratio": 8.0,
+            "revenue_growth": -0.03,
+            "free_cash_flow_growth": -0.10,
+            "debt_to_equity": 1.4,
+            "return_on_capital": 0.05,
+        }
+        result = ValueTraps().evaluate(ticker="AAPL")
+        self.assertTrue(result["is_value_trap"])
+        mock_fetch_metrics.assert_called_once_with("AAPL")
+
     def test_when_to_sell(self):
         result = WhenToSellClearCriteria().evaluate(
             thesis_broken=False,
@@ -181,6 +194,19 @@ class TestMinimalHeuristics(unittest.TestCase):
             gross_margin=0.6,
             capital_intensity=0.04,
         )
+        self.assertEqual(result["business_model_type"], "recurring_revenue")
+
+    @patch("business_moat.fetch_deep_financials")
+    @patch("business_moat.fetch_historical_margins")
+    @patch("business_moat.fetch_company_info")
+    def test_business_model_type_fetches_real_company_data(self, mock_company_info, mock_margins, mock_financials):
+        mock_company_info.return_value = {
+            "description": "The company sells software as a service subscriptions with recurring renewals."
+        }
+        mock_margins.return_value = pd.DataFrame([{"Year": 2024, "Gross_Margin": 0.7}])
+        mock_financials.return_value = {"total_revenue": 1000.0, "capex_total": -50.0}
+
+        result = BusinessModelTypes().evaluate(ticker="AAPL")
         self.assertEqual(result["business_model_type"], "recurring_revenue")
 
     def test_durability_of_competitive_advantage(self):
@@ -355,6 +381,26 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["governance_score"], 4)
         self.assertEqual(result["shareholder_orientation"], "strong")
 
+    @patch("valuation_capital.fetch_management_commentary")
+    @patch("management_governance.fetch_latest_filing_text")
+    @patch("management_governance.yf.Ticker")
+    def test_shareholder_orientation_fetches_real_governance_inputs(self, mock_ticker, mock_proxy_text, mock_commentary):
+        mock_ticker.return_value.info = {"heldPercentInsiders": 0.08}
+        mock_proxy_text.return_value = (
+            "Executive compensation incentives are tied to return on invested capital. "
+            "The company has Class A common stock and Class B common stock."
+        )
+        mock_commentary.return_value = "The board approved share repurchases when shares trade below intrinsic value."
+
+        result = CorporateGovernanceAndShareholderOrientation().evaluate(ticker="AAPL")
+
+        self.assertEqual(result["insider_ownership"], 0.08)
+        self.assertTrue(result["roic_linked_pay"])
+        self.assertTrue(result["dual_class_structure"])
+        self.assertTrue(result["buybacks_below_intrinsic_value"])
+        self.assertEqual(result["governance_score"], 3)
+        self.assertEqual(result["shareholder_orientation"], "strong")
+
     def test_economic_reality(self):
         result = CorePrincipleSeeThroughAccountingToEconomicReality().evaluate(
             net_income=100.0,
@@ -391,6 +437,27 @@ class TestMinimalHeuristics(unittest.TestCase):
             level_3_assets_ratio=0.06,
         )
         self.assertEqual(result["derivatives_risk"], "moderate")
+
+    @patch("business_moat.fetch_cpi_inflation_data")
+    @patch("business_moat.fetch_historical_margins")
+    def test_impact_of_inflation_fetches_real_inputs_for_ticker(self, mock_margins, mock_inflation):
+        mock_margins.return_value = pd.DataFrame(
+            [
+                {"Year": 2023, "Gross_Margin": 0.40, "Operating_Margin": 0.20},
+                {"Year": 2024, "Gross_Margin": 0.41, "Operating_Margin": 0.21},
+            ]
+        )
+        mock_inflation.return_value = pd.DataFrame(
+            [
+                {"Year": 2023, "Inflation_Rate": 3.5},
+                {"Year": 2024, "Inflation_Rate": 2.8},
+            ]
+        )
+
+        from risk_behavior import TheImpactOfInflation
+        result = TheImpactOfInflation().evaluate(ticker="AAPL")
+        self.assertFalse(result.empty)
+        self.assertIn("Pricing_Power_Assessment", result.columns)
 
     def test_independent_thinking(self):
         result = IndependentThinking().evaluate(

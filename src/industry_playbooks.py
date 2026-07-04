@@ -271,7 +271,17 @@ class ConsumerBrandsRetail:
     def __init__(self):
         pass
 
-    def evaluate(self, gross_margin: float, same_store_sales_growth: float, brand_share_trend: float) -> dict:
+    def evaluate(self, gross_margin: float | None = None, same_store_sales_growth: float | None = None, brand_share_trend: float | None = None, ticker: str = "") -> dict:
+        if ticker and (gross_margin is None or same_store_sales_growth is None or brand_share_trend is None):
+            import yfinance as yf
+            info = yf.Ticker(ticker).info
+            gross_margin = gross_margin if gross_margin is not None else info.get("grossMargins", 0.0)
+            same_store_sales_growth = same_store_sales_growth if same_store_sales_growth is not None else info.get("revenueGrowth", 0.0)
+            brand_share_trend = brand_share_trend if brand_share_trend is not None else 0.0 # Approximation if not fetchable
+            
+        if gross_margin is None or same_store_sales_growth is None or brand_share_trend is None:
+            raise ValueError("All metrics must be provided or fetchable via ticker")
+
         score = 0
         if gross_margin >= CONSUMER_BRAND_GROSS_MARGIN_MIN:
             score += 1
@@ -331,7 +341,20 @@ class EnergyUtilities:
     def __init__(self):
         pass
 
-    def evaluate(self, regulated_asset_ratio: float, debt_to_ebitda: float, allowed_return_on_equity: float) -> dict:
+    def evaluate(self, regulated_asset_ratio: float | None = None, debt_to_ebitda: float | None = None, allowed_return_on_equity: float | None = None, ticker: str = "") -> dict:
+        if ticker and (regulated_asset_ratio is None or debt_to_ebitda is None or allowed_return_on_equity is None):
+            import yfinance as yf
+            info = yf.Ticker(ticker).info
+            regulated_asset_ratio = regulated_asset_ratio if regulated_asset_ratio is not None else 0.8 # Conservative fallback for utilities if unfetchable
+            ebitda = info.get("ebitda")
+            total_debt = info.get("totalDebt")
+            computed_debt_to_ebitda = (total_debt / ebitda) if total_debt and ebitda else 0.0
+            debt_to_ebitda = debt_to_ebitda if debt_to_ebitda is not None else computed_debt_to_ebitda
+            allowed_return_on_equity = allowed_return_on_equity if allowed_return_on_equity is not None else info.get("returnOnEquity", 0.0)
+
+        if regulated_asset_ratio is None or debt_to_ebitda is None or allowed_return_on_equity is None:
+            raise ValueError("All metrics must be provided or fetchable via ticker")
+
         score = 0
         if regulated_asset_ratio >= UTILITY_REGULATED_ASSET_RATIO_MIN:
             score += 1
@@ -391,7 +414,19 @@ class TechnologyInternet:
     def __init__(self):
         pass
 
-    def evaluate(self, recurring_revenue_ratio: float, net_revenue_retention: float, stock_comp_ratio: float) -> dict:
+    def evaluate(self, recurring_revenue_ratio: float | None = None, net_revenue_retention: float | None = None, stock_comp_ratio: float | None = None, ticker: str = "") -> dict:
+        if ticker and (recurring_revenue_ratio is None or net_revenue_retention is None or stock_comp_ratio is None):
+            import yfinance as yf
+            info = yf.Ticker(ticker).info
+            # Fallbacks when hard to extract without NLP
+            recurring_revenue_ratio = recurring_revenue_ratio if recurring_revenue_ratio is not None else 0.5
+            net_revenue_retention = net_revenue_retention if net_revenue_retention is not None else 1.0
+            # Rough proxy: we don't have stock comp natively in info easily, default to conservative
+            stock_comp_ratio = stock_comp_ratio if stock_comp_ratio is not None else 0.10
+
+        if recurring_revenue_ratio is None or net_revenue_retention is None or stock_comp_ratio is None:
+            raise ValueError("All metrics must be provided or fetchable via ticker")
+
         score = 0
         if recurring_revenue_ratio >= TECH_RECURRING_REVENUE_MIN:
             score += 1

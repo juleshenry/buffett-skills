@@ -22,6 +22,7 @@ from evaluator_thresholds import (
     INFLATION_SPIKE_RATE_MIN,
 )
 from thinking_frameworks import fetch_company_info
+from financial_metrics import fetch_deep_financials
 
 # --- Configuration ---
 OLLAMA_API_URL = OLLAMA_GENERATE_URL
@@ -350,7 +351,44 @@ class BusinessModelTypes:
     def __init__(self):
         pass
 
-    def evaluate(self, recurring_revenue_ratio: float, gross_margin: float, capital_intensity: float) -> dict:
+    def evaluate(
+        self,
+        recurring_revenue_ratio: Optional[float] = None,
+        gross_margin: Optional[float] = None,
+        capital_intensity: Optional[float] = None,
+        ticker: str = "",
+    ) -> dict:
+        if ticker and any(value is None for value in (recurring_revenue_ratio, gross_margin, capital_intensity)):
+            company_info = fetch_company_info(ticker)
+            description = (company_info.get("description") or "").lower()
+            recurring_keywords = (
+                "subscription",
+                "subscriptions",
+                "recurring",
+                "renewal",
+                "renewals",
+                "membership",
+                "software as a service",
+                "saas",
+            )
+            keyword_hits = sum(1 for keyword in recurring_keywords if keyword in description)
+            recurring_revenue_ratio = min(1.0, max(0.1, keyword_hits / 4))
+
+            if gross_margin is None:
+                margins_df = fetch_historical_margins(ticker)
+                if not margins_df.empty:
+                    gross_margin = float(margins_df.sort_values("Year").iloc[-1]["Gross_Margin"])
+
+            if capital_intensity is None:
+                financials = fetch_deep_financials(ticker)
+                total_revenue = financials.get("total_revenue")
+                capex_total = financials.get("capex_total")
+                if total_revenue and capex_total is not None:
+                    capital_intensity = abs(float(capex_total)) / float(total_revenue)
+
+        if recurring_revenue_ratio is None or gross_margin is None or capital_intensity is None:
+            raise ValueError("recurring_revenue_ratio, gross_margin, and capital_intensity are required")
+
         if recurring_revenue_ratio >= BUSINESS_MODEL_RECURRING_REVENUE_MIN:
             model_type = "recurring_revenue"
         elif gross_margin <= BUSINESS_MODEL_ASSET_HEAVY_GROSS_MARGIN_MAX and capital_intensity >= BUSINESS_MODEL_ASSET_HEAVY_CAPITAL_INTENSITY_MIN:

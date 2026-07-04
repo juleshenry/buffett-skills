@@ -3,6 +3,7 @@ import urllib.request
 import urllib.error
 import re
 from typing import Dict, Any, Optional
+import yfinance as yf
 from transformers import pipeline
 from evaluator_config import DEFAULT_OLLAMA_HOST, DEFAULT_OLLAMA_MODEL
 from evaluator_thresholds import (
@@ -14,7 +15,7 @@ from evaluator_thresholds import (
     GOVERNANCE_INSIDER_OWNERSHIP_MIN,
     GOVERNANCE_STRONG_SCORE_MIN,
 )
-from sec_data import fetch_filing_keyword_context, fetch_filing_section
+from sec_data import fetch_filing_keyword_context, fetch_filing_section, fetch_latest_filing_text
 
 
 def analyze_management_governance(ticker: str, transcript: Optional[str] = None, proxy_statement: Optional[str] = None) -> str:
@@ -316,11 +317,30 @@ class CorporateGovernanceAndShareholderOrientation:
 
     def evaluate(
         self,
-        insider_ownership: float,
-        roic_linked_pay: bool,
-        dual_class_structure: bool,
-        buybacks_below_intrinsic_value: bool,
+        insider_ownership: Optional[float] = None,
+        roic_linked_pay: Optional[bool] = None,
+        dual_class_structure: Optional[bool] = None,
+        buybacks_below_intrinsic_value: Optional[bool] = None,
+        ticker: str = "",
     ) -> dict:
+        if ticker and any(value is None for value in (insider_ownership, roic_linked_pay, dual_class_structure, buybacks_below_intrinsic_value)):
+            proxy_text = self._fetch_proxy_text(ticker)
+            proxy_flags = self._parse_proxy_governance(proxy_text)
+
+            if insider_ownership is None:
+                insider_ownership = self._fetch_insider_ownership(ticker)
+            if roic_linked_pay is None:
+                roic_linked_pay = proxy_flags["roic_linked_pay"]
+            if dual_class_structure is None:
+                dual_class_structure = proxy_flags["dual_class_structure"]
+            if buybacks_below_intrinsic_value is None:
+                buybacks_below_intrinsic_value = self._fetch_buyback_orientation(ticker)
+
+        if insider_ownership is None or roic_linked_pay is None or dual_class_structure is None or buybacks_below_intrinsic_value is None:
+            raise ValueError(
+                "insider_ownership, roic_linked_pay, dual_class_structure, and buybacks_below_intrinsic_value are required"
+            )
+
         score = 0
         if insider_ownership >= GOVERNANCE_INSIDER_OWNERSHIP_MIN:
             score += 1
@@ -345,6 +365,47 @@ class CorporateGovernanceAndShareholderOrientation:
             "governance_score": score,
             "shareholder_orientation": orientation
         }
+
+    def _fetch_insider_ownership(self, ticker: str) -> float:
+        info = yf.Ticker(ticker).info or {}
+        return float(info.get("heldPercentInsiders") or 0.0)
+
+    def _fetch_proxy_text(self, ticker: str) -> str:
+        return fetch_latest_filing_text(ticker, form="DEF 14A")
+
+    def _parse_proxy_governance(self, proxy_text: str) -> dict:
+        lower_text = proxy_text.lower()
+        compensation_terms = ("compensation", "bonus", "incentive", "incentives")
+        performance_terms = ("return on invested capital", "roic", "return on equity", "roe")
+
+        roic_linked_pay = any(term in lower_text for term in compensation_terms) and any(
+            term in lower_text for term in performance_terms
+        )
+
+        dual_class_structure = "dual-class" in lower_text or (
+            ("class a common stock" in lower_text or "class a shares" in lower_text)
+            and ("class b common stock" in lower_text or "class b shares" in lower_text)
+        )
+
+        return {
+            "roic_linked_pay": roic_linked_pay,
+            "dual_class_structure": dual_class_structure,
+        }
+
+    def _fetch_buyback_orientation(self, ticker: str) -> bool:
+        from valuation_capital import fetch_management_commentary
+
+        commentary = fetch_management_commentary(ticker)
+        lower_text = commentary.lower()
+        mentions_repurchase = any(
+            term in lower_text
+            for term in ("share repurchase", "share repurchases", "stock repurchase", "buyback", "buybacks")
+        )
+        mentions_intrinsic_value = any(
+            term in lower_text
+            for term in ("intrinsic value", "below intrinsic value", "undervalued")
+        )
+        return mentions_repurchase and mentions_intrinsic_value
 
     def _helper_method(self):
         """

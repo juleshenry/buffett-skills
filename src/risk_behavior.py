@@ -2,6 +2,7 @@ import os
 import json
 import requests
 from typing import Dict, Any, Optional
+import yfinance as yf
 from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL
 from evaluator_thresholds import (
     BEHAVIORAL_HIGH_RISK_FLAG_COUNT_MIN,
@@ -100,6 +101,73 @@ Respond ONLY with valid JSON. Do not include markdown formatting like ```json or
         print("Raw response:", result.get("response"))
         return None
 
+
+def _get_statement_value(statement, names: tuple[str, ...], column_index: int = 0) -> Optional[float]:
+    if statement is None or getattr(statement, "empty", True):
+        return None
+    for name in names:
+        if name in statement.index:
+            value = statement.loc[name].iloc[column_index]
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def fetch_value_trap_metrics(ticker: str) -> dict:
+    stock = yf.Ticker(ticker)
+    info = stock.info or {}
+    income_stmt = stock.income_stmt
+    cashflow = stock.cashflow
+    balance_sheet = stock.balance_sheet
+
+    pe_ratio = info.get("trailingPE") or info.get("forwardPE")
+    debt_to_equity = info.get("debtToEquity")
+    if debt_to_equity is not None:
+        debt_to_equity = float(debt_to_equity) / 100.0
+
+    revenue_growth = None
+    if income_stmt is not None and not income_stmt.empty and income_stmt.shape[1] >= 2:
+        recent_revenue = _get_statement_value(income_stmt, ("Total Revenue", "Operating Revenue"), 0)
+        prior_revenue = _get_statement_value(income_stmt, ("Total Revenue", "Operating Revenue"), 1)
+        if recent_revenue is not None and prior_revenue not in (None, 0):
+            revenue_growth = (recent_revenue - prior_revenue) / abs(prior_revenue)
+
+    free_cash_flow_growth = None
+    if cashflow is not None and not cashflow.empty and cashflow.shape[1] >= 2:
+        recent_fcf = _get_statement_value(cashflow, ("Free Cash Flow",), 0)
+        prior_fcf = _get_statement_value(cashflow, ("Free Cash Flow",), 1)
+        if recent_fcf is None or prior_fcf is None:
+            recent_ocf = _get_statement_value(cashflow, ("Operating Cash Flow", "Total Cash From Operating Activities"), 0)
+            prior_ocf = _get_statement_value(cashflow, ("Operating Cash Flow", "Total Cash From Operating Activities"), 1)
+            recent_capex = _get_statement_value(cashflow, ("Capital Expenditure",), 0)
+            prior_capex = _get_statement_value(cashflow, ("Capital Expenditure",), 1)
+            if None not in (recent_ocf, recent_capex):
+                recent_fcf = recent_ocf + recent_capex
+            if None not in (prior_ocf, prior_capex):
+                prior_fcf = prior_ocf + prior_capex
+        if recent_fcf is not None and prior_fcf not in (None, 0):
+            free_cash_flow_growth = (recent_fcf - prior_fcf) / abs(prior_fcf)
+
+    return_on_capital = None
+    earnings = _get_statement_value(income_stmt, ("Operating Income", "Net Income"), 0)
+    total_debt = _get_statement_value(balance_sheet, ("Total Debt", "Long Term Debt", "Long Term Debt And Capital Lease Obligation"), 0)
+    equity = _get_statement_value(balance_sheet, ("Stockholders Equity", "Total Equity Gross Minority Interest", "Common Stock Equity"), 0)
+    cash = _get_statement_value(balance_sheet, ("Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments", "Cash And Short Term Investments"), 0)
+    if None not in (earnings, total_debt, equity):
+        invested_capital = total_debt + equity - (cash or 0.0)
+        if invested_capital > 0:
+            return_on_capital = earnings / invested_capital
+
+    return {
+        "pe_ratio": float(pe_ratio) if pe_ratio is not None else None,
+        "revenue_growth": revenue_growth,
+        "free_cash_flow_growth": free_cash_flow_growth,
+        "debt_to_equity": debt_to_equity,
+        "return_on_capital": return_on_capital,
+    }
+
 def main():
     ticker = "AAPL"
     
@@ -165,12 +233,24 @@ class ValueTraps:
 
     def evaluate(
         self,
-        pe_ratio: float,
-        revenue_growth: float,
-        free_cash_flow_growth: float,
-        debt_to_equity: float,
-        return_on_capital: float,
+        pe_ratio: Optional[float] = None,
+        revenue_growth: Optional[float] = None,
+        free_cash_flow_growth: Optional[float] = None,
+        debt_to_equity: Optional[float] = None,
+        return_on_capital: Optional[float] = None,
+        ticker: str = "",
     ) -> dict:
+        if ticker and any(value is None for value in (pe_ratio, revenue_growth, free_cash_flow_growth, debt_to_equity, return_on_capital)):
+            metrics = fetch_value_trap_metrics(ticker)
+            pe_ratio = metrics["pe_ratio"]
+            revenue_growth = metrics["revenue_growth"]
+            free_cash_flow_growth = metrics["free_cash_flow_growth"]
+            debt_to_equity = metrics["debt_to_equity"]
+            return_on_capital = metrics["return_on_capital"]
+
+        if any(value is None for value in (pe_ratio, revenue_growth, free_cash_flow_growth, debt_to_equity, return_on_capital)):
+            raise ValueError("pe_ratio, revenue_growth, free_cash_flow_growth, debt_to_equity, and return_on_capital are required")
+
         flags = []
 
         if pe_ratio <= VALUE_TRAP_PE_RATIO_MAX:
@@ -229,8 +309,18 @@ class TheImpactOfInflation:
     def __init__(self):
         pass
 
-    def evaluate(self, margins_df, inflation_df):
+    def evaluate(self, margins_df=None, inflation_df=None, ticker: str = ""):
+        from business_moat import fetch_historical_margins, fetch_cpi_inflation_data
         import pandas as pd
+
+        if ticker and (margins_df is None or inflation_df is None):
+            margins_df = fetch_historical_margins(ticker)
+            if not margins_df.empty:
+                inflation_df = fetch_cpi_inflation_data(int(margins_df["Year"].min()), int(margins_df["Year"].max()))
+
+        if margins_df is None or inflation_df is None:
+            raise ValueError("margins_df and inflation_df are required")
+
         if margins_df.empty or inflation_df.empty:
             return pd.DataFrame()
             
