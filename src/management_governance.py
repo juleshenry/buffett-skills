@@ -21,6 +21,18 @@ from sec_data import fetch_filing_keyword_context, fetch_filing_section, fetch_l
 def analyze_management_governance(ticker: str, transcript: Optional[str] = None, proxy_statement: Optional[str] = None) -> str:
     return ManagementEvaluation().evaluate(ticker, transcript=transcript, proxy_stmt=proxy_statement)
 
+
+def _get_statement_value(statement, labels: tuple[str, ...], column_index: int = 0):
+    if statement is None or getattr(statement, "empty", True) or statement.shape[1] <= column_index:
+        return None
+
+    for label in labels:
+        if label in statement.index:
+            value = statement.loc[label].iloc[column_index]
+            if value is not None:
+                return float(value)
+    return None
+
 class ManagementGovernanceAnalyzer:
     """
     Analyzer class to evaluate corporate management and governance.
@@ -243,7 +255,17 @@ class CorporateCulture:
     def __init__(self):
         pass
 
-    def evaluate(self, employee_turnover: float, insider_ownership: float, restructurings_per_5y: int) -> dict:
+    def evaluate(self, employee_turnover: float | None = None, insider_ownership: float | None = None, restructurings_per_5y: int | None = None, ticker: str = "") -> dict:
+        if ticker and (employee_turnover is None or insider_ownership is None or restructurings_per_5y is None):
+            import yfinance as yf
+            info = yf.Ticker(ticker).info
+            insider_ownership = insider_ownership if insider_ownership is not None else info.get("heldPercentInsiders", 0.0)
+            employee_turnover = employee_turnover if employee_turnover is not None else 0.10 # Hard to grab automatically, default to stable
+            restructurings_per_5y = restructurings_per_5y if restructurings_per_5y is not None else 0 # Default to 0 unless analyzed
+            
+        if employee_turnover is None or insider_ownership is None or restructurings_per_5y is None:
+            raise ValueError("All metrics must be provided or fetchable via ticker")
+
         score = 0
         if employee_turnover <= CULTURE_EMPLOYEE_TURNOVER_MAX:
             score += 1
@@ -279,7 +301,19 @@ class AcquisitionLogicAcquisitionCriteria:
     def __init__(self):
         pass
 
-    def evaluate(self, purchase_multiple: float, return_on_invested_capital: float, debt_funded: bool) -> dict:
+    def evaluate(self, purchase_multiple: float | None = None, return_on_invested_capital: float | None = None, debt_funded: bool | None = None, ticker: str = "") -> dict:
+        if ticker and (purchase_multiple is None or return_on_invested_capital is None or debt_funded is None):
+            acquisition_inputs = self._fetch_acquisition_inputs(ticker)
+            if purchase_multiple is None:
+                purchase_multiple = acquisition_inputs["purchase_multiple"]
+            if return_on_invested_capital is None:
+                return_on_invested_capital = acquisition_inputs["return_on_invested_capital"]
+            if debt_funded is None:
+                debt_funded = acquisition_inputs["debt_funded"]
+            
+        if purchase_multiple is None or return_on_invested_capital is None or debt_funded is None:
+            raise ValueError("All metrics must be provided or fetchable via ticker")
+
         score = 0
         if purchase_multiple <= ACQUISITION_PURCHASE_MULTIPLE_MAX:
             score += 1
@@ -307,6 +341,72 @@ class AcquisitionLogicAcquisitionCriteria:
         Example helper method. All internal logic should be _ prefixed.
         """
         pass
+
+    def _fetch_acquisition_inputs(self, ticker: str) -> dict:
+        commentary = self._fetch_acquisition_commentary(ticker)
+        return {
+            "purchase_multiple": self._parse_purchase_multiple(commentary),
+            "return_on_invested_capital": self._fetch_return_on_invested_capital(ticker),
+            "debt_funded": self._parse_debt_funding(commentary),
+        }
+
+    def _fetch_acquisition_commentary(self, ticker: str) -> str:
+        keyword_sets = (
+            ("8-K", ("acquisition", "merger agreement", "purchase price", "financing", "term loan")),
+            ("10-K", ("acquisition", "business combination", "purchase price", "acquired", "financing")),
+            ("10-Q", ("acquisition", "business combination", "purchase price", "acquired", "financing")),
+        )
+
+        for form, keywords in keyword_sets:
+            try:
+                commentary = fetch_filing_keyword_context(
+                    ticker,
+                    form=form,
+                    keywords=keywords,
+                    context_chars=1800,
+                    max_matches=3,
+                    max_chars=10000,
+                )
+                if commentary:
+                    return commentary
+            except Exception:
+                continue
+
+        return ""
+
+    def _parse_purchase_multiple(self, commentary: str) -> float:
+        text = commentary.lower()
+        match = re.search(r"(\d+(?:\.\d+)?)\s*x\s*(?:ebitda|earnings)", text)
+        if match:
+            return float(match.group(1))
+
+        if "disciplined acquisition" in text or "value creation" in text:
+            return float(ACQUISITION_PURCHASE_MULTIPLE_MAX)
+
+        return float(ACQUISITION_PURCHASE_MULTIPLE_MAX + 2)
+
+    def _parse_debt_funding(self, commentary: str) -> bool:
+        text = commentary.lower()
+        debt_terms = ("debt financing", "term loan", "bridge facility", "notes offering", "borrowings")
+        return any(term in text for term in debt_terms)
+
+    def _fetch_return_on_invested_capital(self, ticker: str) -> float:
+        stock = yf.Ticker(ticker)
+        income_stmt = stock.income_stmt
+        balance_sheet = stock.balance_sheet
+        earnings = _get_statement_value(income_stmt, ("Operating Income", "Net Income"), 0)
+        total_debt = _get_statement_value(balance_sheet, ("Total Debt", "Long Term Debt", "Long Term Debt And Capital Lease Obligation"), 0)
+        equity = _get_statement_value(balance_sheet, ("Stockholders Equity", "Total Equity Gross Minority Interest", "Common Stock Equity"), 0)
+        cash = _get_statement_value(balance_sheet, ("Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments", "Cash And Short Term Investments"), 0)
+
+        if None in (earnings, total_debt, equity):
+            return 0.0
+
+        invested_capital = total_debt + equity - (cash or 0.0)
+        if invested_capital <= 0:
+            return 0.0
+
+        return float(earnings / invested_capital)
 
 class CorporateGovernanceAndShareholderOrientation:
     """

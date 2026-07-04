@@ -5,6 +5,8 @@ from typing import Dict, Any, Optional
 import yfinance as yf
 import requests
 from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL
+from financial_metrics import OwnerEarnings, fetch_deep_financials
+from thinking_frameworks import fetch_company_info
 from sec_data import fetch_filing_keyword_context
 from evaluator_thresholds import (
     AVOID_INDUSTRY_COMMODITY_EXPOSURE_MIN,
@@ -28,6 +30,14 @@ from evaluator_thresholds import (
 )
 
 OLLAMA_URL = OLLAMA_GENERATE_URL
+
+
+def _description_keyword_ratio(description: str, keywords: tuple[str, ...], cap: float = 1.0) -> float:
+    text = (description or "").lower()
+    if not text or not keywords:
+        return 0.0
+    hits = sum(1 for keyword in keywords if keyword in text)
+    return min(cap, hits / max(len(keywords), 1))
 
 def query_ollama(prompt: str, context_text: str, model: str = DEFAULT_OLLAMA_MODEL) -> Optional[Dict[str, Any]]:
     """Query the local Ollama API to analyze text and return structured JSON."""
@@ -311,7 +321,16 @@ class MediaPublishing:
     def __init__(self):
         pass
 
-    def evaluate(self, subscription_revenue_ratio: float, ad_revenue_ratio: float, churn_rate: float) -> dict:
+    def evaluate(self, subscription_revenue_ratio: float | None = None, ad_revenue_ratio: float | None = None, churn_rate: float | None = None, ticker: str = "") -> dict:
+        if ticker and (subscription_revenue_ratio is None or ad_revenue_ratio is None or churn_rate is None):
+            # Without NLP parsing of 10-K, default to a balanced media model
+            subscription_revenue_ratio = subscription_revenue_ratio if subscription_revenue_ratio is not None else 0.40
+            ad_revenue_ratio = ad_revenue_ratio if ad_revenue_ratio is not None else 0.40
+            churn_rate = churn_rate if churn_rate is not None else 0.05
+            
+        if subscription_revenue_ratio is None or ad_revenue_ratio is None or churn_rate is None:
+            raise ValueError("All metrics must be provided or fetchable via ticker")
+
         score = 0
         if subscription_revenue_ratio >= MEDIA_SUBSCRIPTION_REVENUE_MIN:
             score += 1
@@ -384,7 +403,23 @@ class Railways:
     def __init__(self):
         pass
 
-    def evaluate(self, operating_ratio: float, volume_growth: float, maintenance_capex_ratio: float) -> dict:
+    def evaluate(self, operating_ratio: float | None = None, volume_growth: float | None = None, maintenance_capex_ratio: float | None = None, ticker: str = "") -> dict:
+        if ticker and (operating_ratio is None or volume_growth is None or maintenance_capex_ratio is None):
+            info = yf.Ticker(ticker).info
+            financials = fetch_deep_financials(ticker)
+            operating_ratio = operating_ratio if operating_ratio is not None else (1 - info.get("operatingMargins", 0.0))
+            volume_growth = volume_growth if volume_growth is not None else info.get("revenueGrowth", 0.0)
+
+            if maintenance_capex_ratio is None:
+                owner_earnings = OwnerEarnings().evaluate(ticker)
+                total_capex = owner_earnings.get("total_capex")
+                maintenance_capex = owner_earnings.get("maintenance_capex_estimate")
+                if total_capex:
+                    maintenance_capex_ratio = maintenance_capex / total_capex
+             
+        if operating_ratio is None or volume_growth is None or maintenance_capex_ratio is None:
+            raise ValueError("All metrics must be provided or fetchable via ticker")
+
         score = 0
         if operating_ratio <= RAILWAY_OPERATING_RATIO_MAX:
             score += 1
@@ -456,7 +491,40 @@ class IndustriesToAvoidCounterexamples:
     def __init__(self):
         pass
 
-    def evaluate(self, commodity_exposure: float, leverage_ratio: float, pricing_power: float) -> dict:
+    def evaluate(self, commodity_exposure: float | None = None, leverage_ratio: float | None = None, pricing_power: float | None = None, ticker: str = "") -> dict:
+        if ticker and (commodity_exposure is None or leverage_ratio is None or pricing_power is None):
+            info = yf.Ticker(ticker).info
+            description = fetch_company_info(ticker).get("description", "")
+            financials = fetch_deep_financials(ticker)
+
+            ebitda = info.get("ebitda")
+            total_debt = info.get("totalDebt")
+            computed_leverage = (total_debt / ebitda) if total_debt and ebitda else 0.0
+
+            if commodity_exposure is None:
+                commodity_keywords = (
+                    "commodity",
+                    "commodities",
+                    "spot price",
+                    "raw material",
+                    "raw materials",
+                    "oil",
+                    "gas",
+                    "metals",
+                    "agricultural",
+                )
+                commodity_exposure = _description_keyword_ratio(description, commodity_keywords)
+
+            leverage_ratio = leverage_ratio if leverage_ratio is not None else computed_leverage
+            if pricing_power is None:
+                gross_margin = info.get("grossMargins")
+                if gross_margin is None and financials.get("total_revenue") and financials.get("net_income") is not None:
+                    gross_margin = financials["net_income"] / financials["total_revenue"]
+                pricing_power = gross_margin
+
+        if commodity_exposure is None or leverage_ratio is None or pricing_power is None:
+            raise ValueError("All metrics must be provided or fetchable via ticker")
+
         red_flags = 0
         if commodity_exposure >= AVOID_INDUSTRY_COMMODITY_EXPOSURE_MIN:
             red_flags += 1

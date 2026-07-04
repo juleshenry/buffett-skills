@@ -5,6 +5,7 @@ from typing import Dict, Any
 import pandas as pd
 from investment_philosophy import fetch_price_comparison_data
 from sec_data import fetch_filing_section
+from valuation_capital import fetch_risk_free_rate
 from evaluator_config import (
     DEFAULT_CIRCLE_OF_COMPETENCE_TEMPERATURE,
     DEFAULT_INVERSION_TEMPERATURE,
@@ -338,7 +339,27 @@ class OpportunityCostAwareness:
     def __init__(self):
         pass
 
-    def evaluate(self, candidate_return: float, hurdle_return: float, alternative_return: float) -> dict:
+    def evaluate(
+        self,
+        candidate_return: float | None = None,
+        hurdle_return: float | None = None,
+        alternative_return: float | None = None,
+        ticker: str = "",
+        benchmark: str = "^GSPC",
+        years: int = 10,
+    ) -> dict:
+        if ticker and (candidate_return is None or hurdle_return is None or alternative_return is None):
+            price_data = fetch_price_comparison_data(ticker, years=years, benchmark=benchmark)
+            if candidate_return is None:
+                candidate_return = price_data["stock_cagr"]
+            if alternative_return is None:
+                alternative_return = price_data["benchmark_cagr"]
+            if hurdle_return is None:
+                hurdle_return = max(fetch_risk_free_rate() + 0.05, 0.09)
+
+        if candidate_return is None or hurdle_return is None or alternative_return is None:
+            raise ValueError("candidate_return, hurdle_return, and alternative_return are required")
+
         best_alternative = max(hurdle_return, alternative_return)
         spread = candidate_return - best_alternative
         clears_hurdle = candidate_return >= best_alternative

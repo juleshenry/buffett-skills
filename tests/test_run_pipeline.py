@@ -102,7 +102,6 @@ class TestRunPipeline(unittest.TestCase):
         }
         mock_classes.return_value = {
             "investment_philosophy": [run.investment_philosophy.FocusInvesting],
-            "risk_behavior": [run.risk_behavior.DerivativesRisk],
         }
 
         result = run.analyze_company("YUM")
@@ -110,10 +109,6 @@ class TestRunPipeline(unittest.TestCase):
         self.assertEqual(
             result["investment_philosophy"]["FocusInvesting"],
             {"error": "Missing real inputs", "missing_inputs": ["positions"]},
-        )
-        self.assertEqual(
-            result["risk_behavior"]["DerivativesRisk"],
-            {"error": "Missing real inputs", "missing_inputs": ["notional_exposure", "equity_capital", "level_3_assets_ratio"]},
         )
 
 

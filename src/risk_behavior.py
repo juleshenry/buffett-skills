@@ -352,7 +352,45 @@ class DerivativesRisk:
     def __init__(self):
         pass
 
-    def evaluate(self, notional_exposure: float, equity_capital: float, level_3_assets_ratio: float) -> dict:
+    def evaluate(
+        self,
+        notional_exposure: Optional[float] = None,
+        equity_capital: Optional[float] = None,
+        level_3_assets_ratio: Optional[float] = None,
+        ticker: str = "",
+    ) -> dict:
+        if ticker and any(value is None for value in (notional_exposure, equity_capital, level_3_assets_ratio)):
+            footnote_analysis = LeverageRisk().evaluate(ticker)
+            toxic_summary = str(footnote_analysis.get("toxic_derivative_exposure") or "").strip()
+
+            stock = yf.Ticker(ticker)
+            balance_sheet = stock.balance_sheet
+            equity_capital = _get_statement_value(
+                balance_sheet,
+                ("Stockholders Equity", "Total Equity Gross Minority Interest", "Common Stock Equity"),
+            )
+
+            normalized_summary = toxic_summary.lower()
+            if normalized_summary:
+                if any(token in normalized_summary for token in ("none", "no material", "not found")):
+                    risk = "low"
+                elif any(token in normalized_summary for token in ("significant", "material", "substantial", "toxic")):
+                    risk = "high"
+                else:
+                    risk = "moderate"
+
+                return {
+                    "notional_exposure": notional_exposure,
+                    "equity_capital": equity_capital,
+                    "exposure_ratio": None,
+                    "level_3_assets_ratio": level_3_assets_ratio,
+                    "derivative_exposure_summary": toxic_summary,
+                    "derivatives_risk": risk,
+                }
+
+        if notional_exposure is None or equity_capital is None or level_3_assets_ratio is None:
+            raise ValueError("notional_exposure, equity_capital, and level_3_assets_ratio are required")
+
         exposure_ratio = (notional_exposure / equity_capital) if equity_capital > 0 else None
 
         risk = "low"

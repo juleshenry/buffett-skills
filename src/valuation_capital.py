@@ -565,7 +565,16 @@ class DividendsRetainedEarningsAndTaxEfficiency:
     def __init__(self):
         pass
 
-    def evaluate(self, dividend_payout_ratio: float, retained_return_on_equity: float, tax_rate_on_dividends: float) -> dict:
+    def evaluate(self, dividend_payout_ratio: float | None = None, retained_return_on_equity: float | None = None, tax_rate_on_dividends: float = 0.15, ticker: str = "") -> dict:
+        if ticker and (dividend_payout_ratio is None or retained_return_on_equity is None):
+            import yfinance as yf
+            info = yf.Ticker(ticker).info
+            dividend_payout_ratio = dividend_payout_ratio if dividend_payout_ratio is not None else info.get("payoutRatio", 0.0)
+            retained_return_on_equity = retained_return_on_equity if retained_return_on_equity is not None else info.get("returnOnEquity", 0.0)
+            
+        if dividend_payout_ratio is None or retained_return_on_equity is None:
+            raise ValueError("All metrics must be provided or fetchable via ticker")
+
         retained_earnings_ratio = 1 - dividend_payout_ratio
         after_tax_dividend_value = dividend_payout_ratio * (1 - tax_rate_on_dividends)
         retained_value_creation = retained_earnings_ratio * retained_return_on_equity

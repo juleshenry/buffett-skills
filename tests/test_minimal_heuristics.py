@@ -131,6 +131,19 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertTrue(result["clears_opportunity_cost"])
         self.assertAlmostEqual(result["excess_return_vs_best_alternative"], 0.03)
 
+    @patch("thinking_frameworks.fetch_risk_free_rate")
+    @patch("thinking_frameworks.fetch_price_comparison_data")
+    def test_opportunity_cost_awareness_fetches_real_market_inputs(self, mock_price_data, mock_risk_free):
+        mock_price_data.return_value = {
+            "stock_cagr": 0.15,
+            "benchmark_cagr": 0.12,
+        }
+        mock_risk_free.return_value = 0.04
+
+        result = OpportunityCostAwareness().evaluate(ticker="AAPL")
+        self.assertTrue(result["clears_opportunity_cost"])
+        self.assertAlmostEqual(result["best_alternative"], 0.12)
+
     def test_capital_allocation_analysis(self):
         result = CapitalAllocationAnalysis().evaluate(
             recent_free_cash_flow=300.0,
@@ -265,6 +278,16 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertAlmostEqual(result["forecast_error"], 0.02)
         self.assertTrue(result["forecast_was_useful"])
 
+    @patch("investment_philosophy.fetch_price_comparison_data")
+    def test_market_forecasting_fetches_real_actual_return_for_ticker(self, mock_price_data):
+        mock_price_data.return_value = {
+            "stock_cagr": 0.12,
+        }
+
+        result = MarketForecasting().evaluate(forecast_return=0.10, ticker="AAPL")
+        self.assertAlmostEqual(result["forecast_error"], 0.02)
+        self.assertTrue(result["forecast_was_useful"])
+
     def test_undervalued_margin_of_safety(self):
         result = UndervaluedMarginOfSafety().evaluate(
             intrinsic_value=100.0,
@@ -371,6 +394,17 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
         self.assertEqual(result["goodwill_quality"], "economic_goodwill")
 
+    @patch("business_moat.fetch_goodwill_metrics")
+    def test_goodwill_quality_fetches_real_company_data(self, mock_fetch_metrics):
+        mock_fetch_metrics.return_value = {
+            "goodwill": 400.0,
+            "acquired_earnings": 100.0,
+            "return_on_tangible_assets": 0.15,
+        }
+        result = GoodwillEconomicGoodwillVsAccountingGoodwill().evaluate(ticker="AAPL")
+        self.assertEqual(result["goodwill_quality"], "economic_goodwill")
+        mock_fetch_metrics.assert_called_once_with("AAPL")
+
     def test_shareholder_orientation(self):
         result = CorporateGovernanceAndShareholderOrientation().evaluate(
             insider_ownership=0.08,
@@ -438,6 +472,21 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
         self.assertEqual(result["derivatives_risk"], "moderate")
 
+    @patch("risk_behavior.yf.Ticker")
+    @patch("risk_behavior.LeverageRisk.evaluate")
+    def test_derivatives_risk_fetches_real_footnote_signal_for_ticker(self, mock_leverage_risk, mock_ticker):
+        mock_leverage_risk.return_value = {
+            "toxic_derivative_exposure": "No material exposure"
+        }
+        mock_ticker.return_value.balance_sheet = pd.DataFrame(
+            {pd.Timestamp("2024-12-31"): [500.0]},
+            index=["Stockholders Equity"],
+        )
+
+        result = DerivativesRisk().evaluate(ticker="AAPL")
+        self.assertEqual(result["derivatives_risk"], "low")
+        self.assertEqual(result["derivative_exposure_summary"], "No material exposure")
+
     @patch("business_moat.fetch_cpi_inflation_data")
     @patch("business_moat.fetch_historical_margins")
     def test_impact_of_inflation_fetches_real_inputs_for_ticker(self, mock_margins, mock_inflation):
@@ -484,6 +533,31 @@ class TestMinimalHeuristics(unittest.TestCase):
             debt_funded=False,
         )
         self.assertEqual(result["acquisition_score"], 3)
+        self.assertEqual(result["acquisition_discipline"], "disciplined")
+
+    @patch("management_governance.yf.Ticker")
+    @patch("management_governance.fetch_filing_keyword_context")
+    def test_acquisition_logic_fetches_real_inputs_for_ticker(self, mock_fetch_context, mock_ticker):
+        mock_fetch_context.return_value = "The company acquired a target for 10.0x EBITDA and financed the deal with cash on hand."
+
+        income_stmt = pd.DataFrame({
+            pd.Timestamp("2024-12-31"): {"Operating Income": 140.0}
+        })
+        balance_sheet = pd.DataFrame({
+            pd.Timestamp("2024-12-31"): {
+                "Total Debt": 200.0,
+                "Stockholders Equity": 800.0,
+                "Cash And Cash Equivalents": 100.0,
+            }
+        })
+        mock_ticker.return_value.income_stmt = income_stmt
+        mock_ticker.return_value.balance_sheet = balance_sheet
+
+        result = AcquisitionLogicAcquisitionCriteria().evaluate(ticker="AAPL")
+
+        self.assertEqual(result["purchase_multiple"], 10.0)
+        self.assertAlmostEqual(result["return_on_invested_capital"], 140.0 / 900.0)
+        self.assertFalse(result["debt_funded"])
         self.assertEqual(result["acquisition_discipline"], "disciplined")
 
     def test_special_investment_instruments(self):
@@ -553,6 +627,19 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
         self.assertEqual(result["railway_quality"], "strong")
 
+    @patch("industry_playbooks.OwnerEarnings.evaluate")
+    @patch("industry_playbooks.fetch_deep_financials")
+    @patch("industry_playbooks.yf.Ticker")
+    def test_railways_fetches_real_inputs_for_ticker(self, mock_ticker, mock_financials, mock_owner_earnings):
+        mock_ticker.return_value.info = {"operatingMargins": 0.40, "revenueGrowth": 0.02}
+        mock_financials.return_value = {"total_revenue": 1000.0}
+        mock_owner_earnings.return_value = {"total_capex": 100.0, "maintenance_capex_estimate": 50.0}
+
+        result = Railways().evaluate(ticker="UNP")
+
+        self.assertEqual(result["railway_quality"], "strong")
+        self.assertAlmostEqual(result["maintenance_capex_ratio"], 0.5)
+
     def test_technology_internet(self):
         result = TechnologyInternet().evaluate(
             recurring_revenue_ratio=0.75,
@@ -569,6 +656,21 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
         self.assertEqual(result["red_flag_count"], 3)
         self.assertTrue(result["avoid_industry"])
+
+    @patch("industry_playbooks.fetch_deep_financials")
+    @patch("industry_playbooks.fetch_company_info")
+    @patch("industry_playbooks.yf.Ticker")
+    def test_industries_to_avoid_fetches_real_inputs_for_ticker(self, mock_ticker, mock_company_info, mock_financials):
+        mock_ticker.return_value.info = {"ebitda": 100.0, "totalDebt": 600.0, "grossMargins": 0.2}
+        mock_company_info.return_value = {
+            "description": "The business is highly exposed to commodity spot prices and raw materials."
+        }
+        mock_financials.return_value = {"total_revenue": 1000.0, "net_income": 50.0}
+
+        result = IndustriesToAvoidCounterexamples().evaluate(ticker="X")
+
+        self.assertTrue(result["avoid_industry"])
+        self.assertGreaterEqual(result["red_flag_count"], 2)
 
     @patch("thinking_frameworks.fetch_filing_section")
     @patch("thinking_frameworks.yf.Ticker")

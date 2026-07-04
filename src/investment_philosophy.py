@@ -12,6 +12,7 @@ from evaluator_thresholds import (
     MARKET_FORECAST_USEFUL_ERROR_MAX,
     UNDERVALUED_MARGIN_MIN,
 )
+from valuation_capital import fetch_risk_free_rate
 from valuation_capital import IntrinsicValueEstimation, MarginOfSafety
 
 
@@ -169,7 +170,21 @@ class MarketForecasting:
     def __init__(self):
         pass
 
-    def evaluate(self, forecast_return: float, actual_return: float) -> dict:
+    def evaluate(
+        self,
+        forecast_return: Optional[float] = None,
+        actual_return: Optional[float] = None,
+        ticker: str = "",
+        years: int = DEFAULT_LOOKBACK_YEARS,
+        benchmark: str = DEFAULT_BENCHMARK,
+    ) -> dict:
+        if ticker and actual_return is None:
+            price_data = fetch_price_comparison_data(ticker, years=years, benchmark=benchmark)
+            actual_return = price_data["stock_cagr"]
+
+        if forecast_return is None or actual_return is None:
+            raise ValueError("forecast_return and actual_return are required")
+
         forecast_error = actual_return - forecast_return
         return {
             "forecast_return": forecast_return,

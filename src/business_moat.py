@@ -32,6 +32,54 @@ DEFAULT_MODEL = DEFAULT_OLLAMA_MODEL
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+
+def _get_statement_value(statement, names: tuple[str, ...], column_index: int = 0) -> Optional[float]:
+    if statement is None or getattr(statement, "empty", True):
+        return None
+    for name in names:
+        if name in statement.index:
+            value = statement.loc[name].iloc[column_index]
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def fetch_goodwill_metrics(ticker: str) -> dict:
+    stock = yf.Ticker(ticker)
+    balance_sheet = stock.balance_sheet
+    income_stmt = stock.income_stmt
+
+    goodwill = _get_statement_value(balance_sheet, ("Goodwill", "Goodwill And Other Intangible Assets"))
+    intangible_assets = _get_statement_value(
+        balance_sheet,
+        (
+            "Other Intangible Assets",
+            "Other Intangible Assets Excluding Goodwill",
+            "Net Tangible Assets",
+        ),
+    )
+    total_assets = _get_statement_value(balance_sheet, ("Total Assets",))
+    net_income = _get_statement_value(income_stmt, ("Net Income", "Operating Income"))
+
+    tangible_assets = None
+    if total_assets is not None:
+        tangible_assets = total_assets - (goodwill or 0.0)
+        if intangible_assets is not None and intangible_assets > 0:
+            tangible_assets -= intangible_assets
+
+    return_on_tangible_assets = None
+    if net_income is not None and tangible_assets not in (None, 0):
+        return_on_tangible_assets = net_income / tangible_assets
+
+    return {
+        "goodwill": goodwill,
+        # Net income is the closest broadly available real earnings figure in public statements.
+        "acquired_earnings": net_income,
+        "return_on_tangible_assets": return_on_tangible_assets,
+    }
+
 def _query_ollama_json(prompt: str, model: str = DEFAULT_MODEL) -> dict:
     """Helper function to query the local Ollama API and return parsed JSON."""
     payload = {
@@ -418,7 +466,22 @@ class GoodwillEconomicGoodwillVsAccountingGoodwill:
     def __init__(self):
         pass
 
-    def evaluate(self, goodwill: float, acquired_earnings: float, return_on_tangible_assets: float) -> dict:
+    def evaluate(
+        self,
+        goodwill: Optional[float] = None,
+        acquired_earnings: Optional[float] = None,
+        return_on_tangible_assets: Optional[float] = None,
+        ticker: str = "",
+    ) -> dict:
+        if ticker and any(value is None for value in (goodwill, acquired_earnings, return_on_tangible_assets)):
+            metrics = fetch_goodwill_metrics(ticker)
+            goodwill = metrics["goodwill"]
+            acquired_earnings = metrics["acquired_earnings"]
+            return_on_tangible_assets = metrics["return_on_tangible_assets"]
+
+        if goodwill is None or acquired_earnings is None or return_on_tangible_assets is None:
+            raise ValueError("goodwill, acquired_earnings, and return_on_tangible_assets are required")
+
         goodwill_multiple = (goodwill / acquired_earnings) if acquired_earnings > 0 else None
 
         quality = "accounting_heavy"
