@@ -136,7 +136,22 @@ class CorePrincipleSeeThroughAccountingToEconomicReality:
     def __init__(self):
         pass
 
-    def evaluate(self, net_income: float, operating_cash_flow: float, capex_total: float) -> dict:
+    def evaluate(
+        self,
+        net_income: float | None = None,
+        operating_cash_flow: float | None = None,
+        capex_total: float | None = None,
+        ticker: str = "",
+    ) -> dict:
+        if ticker and (net_income is None or operating_cash_flow is None or capex_total is None):
+            financials = fetch_deep_financials(ticker)
+            net_income = financials.get("net_income")
+            operating_cash_flow = financials.get("operating_cash_flow")
+            capex_total = financials.get("capex_total")
+
+        if net_income is None or operating_cash_flow is None or capex_total is None:
+            raise ValueError("net_income, operating_cash_flow, and capex_total are required")
+
         free_cash_flow = (operating_cash_flow or 0) - abs(capex_total or 0)
         accrual_gap = (net_income or 0) - (operating_cash_flow or 0)
 
@@ -227,7 +242,24 @@ class KeyFinancialMetrics:
     def __init__(self):
         pass
 
-    def evaluate(self, total_revenue: float, net_income: float, operating_cash_flow: float, capex_total: float) -> dict:
+    def evaluate(
+        self,
+        total_revenue: float | None = None,
+        net_income: float | None = None,
+        operating_cash_flow: float | None = None,
+        capex_total: float | None = None,
+        ticker: str = "",
+    ) -> dict:
+        if ticker and (total_revenue is None or net_income is None or operating_cash_flow is None or capex_total is None):
+            financials = fetch_deep_financials(ticker)
+            total_revenue = financials.get("total_revenue")
+            net_income = financials.get("net_income")
+            operating_cash_flow = financials.get("operating_cash_flow")
+            capex_total = financials.get("capex_total")
+
+        if total_revenue is None or net_income is None or operating_cash_flow is None or capex_total is None:
+            raise ValueError("total_revenue, net_income, operating_cash_flow, and capex_total are required")
+
         profit_margin = (net_income / total_revenue) if total_revenue else None
         cash_conversion = (operating_cash_flow / net_income) if net_income else None
         free_cash_flow = (operating_cash_flow or 0) - abs(capex_total or 0)

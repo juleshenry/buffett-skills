@@ -2,7 +2,7 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from typing import List
+from typing import List, Optional
 
 from evaluator_config import DEFAULT_BENCHMARK, DEFAULT_INTRINSIC_VALUE_YEARS, DEFAULT_LOOKBACK_YEARS
 from evaluator_thresholds import (
@@ -13,6 +13,46 @@ from evaluator_thresholds import (
     UNDERVALUED_MARGIN_MIN,
 )
 from valuation_capital import IntrinsicValueEstimation, MarginOfSafety
+
+
+def fetch_price_comparison_data(
+    ticker: str,
+    years: int = DEFAULT_LOOKBACK_YEARS,
+    benchmark: str = DEFAULT_BENCHMARK,
+) -> dict:
+    result_df = Compounding().evaluate([ticker], years=years, benchmark=benchmark)
+    if result_df.empty:
+        raise ValueError(f"No price comparison data fetched for {ticker}")
+
+    row = result_df.iloc[0].to_dict()
+    if "Error" in row:
+        raise ValueError(f"Price comparison data unavailable for {ticker}: {row['Error']}")
+
+    end_date = datetime.today()
+    start_date = end_date - relativedelta(years=years)
+    prices_raw = yf.download(
+        [ticker, benchmark],
+        start=start_date.strftime('%Y-%m-%d'),
+        end=end_date.strftime('%Y-%m-%d'),
+        progress=False,
+    )
+    prices = prices_raw['Close'] if 'Close' in prices_raw else prices_raw
+    aligned_prices = prices[[ticker, benchmark]].dropna()
+    if len(aligned_prices) < 2:
+        raise ValueError(f"Insufficient aligned price data for {ticker}")
+
+    stock_returns = aligned_prices[ticker].pct_change().dropna()
+    benchmark_returns = aligned_prices[benchmark].pct_change().dropna()
+    active_returns = stock_returns - benchmark_returns
+
+    return {
+        "ticker": ticker,
+        "benchmark": benchmark,
+        "period_years": row["Period (Yrs)"],
+        "stock_cagr": row["Stock CAGR"],
+        "benchmark_cagr": row["Benchmark CAGR"],
+        "tracking_error": float(active_returns.std() * (252 ** 0.5)) if not active_returns.empty else 0.0,
+    }
 
 
 def analyze_investment_philosophy(ticker: str, years: int = DEFAULT_LOOKBACK_YEARS, benchmark: str = DEFAULT_BENCHMARK) -> dict:
@@ -87,7 +127,24 @@ class EfficientMarketTheory:
     def __init__(self):
         pass
 
-    def evaluate(self, stock_cagr: float, benchmark_cagr: float, tracking_error: float) -> dict:
+    def evaluate(
+        self,
+        stock_cagr: Optional[float] = None,
+        benchmark_cagr: Optional[float] = None,
+        tracking_error: Optional[float] = None,
+        ticker: str = "",
+        years: int = DEFAULT_LOOKBACK_YEARS,
+        benchmark: str = DEFAULT_BENCHMARK,
+    ) -> dict:
+        if ticker and (stock_cagr is None or benchmark_cagr is None or tracking_error is None):
+            price_data = fetch_price_comparison_data(ticker, years=years, benchmark=benchmark)
+            stock_cagr = price_data["stock_cagr"]
+            benchmark_cagr = price_data["benchmark_cagr"]
+            tracking_error = price_data["tracking_error"]
+
+        if stock_cagr is None or benchmark_cagr is None or tracking_error is None:
+            raise ValueError("stock_cagr, benchmark_cagr, and tracking_error are required")
+
         excess_return = stock_cagr - benchmark_cagr
         market_efficiency_supported = abs(excess_return) <= EFFICIENT_MARKET_EXCESS_RETURN_MAX and tracking_error <= EFFICIENT_MARKET_TRACKING_ERROR_MAX
 
@@ -134,7 +191,21 @@ class UndervaluedMarginOfSafety:
     def __init__(self):
         pass
 
-    def evaluate(self, intrinsic_value: float, market_price: float, minimum_margin: float = UNDERVALUED_MARGIN_MIN) -> dict:
+    def evaluate(
+        self,
+        intrinsic_value: Optional[float] = None,
+        market_price: Optional[float] = None,
+        minimum_margin: float = UNDERVALUED_MARGIN_MIN,
+        ticker: str = "",
+    ) -> dict:
+        if ticker and (intrinsic_value is None or market_price is None):
+            intrinsic_result = IntrinsicValue().evaluate(ticker=ticker)
+            intrinsic_value = intrinsic_result["intrinsic_value_per_share"]
+            market_price = intrinsic_result["market_price"]
+
+        if intrinsic_value is None or market_price is None:
+            raise ValueError("intrinsic_value and market_price are required")
+
         result = MarginOfSafety().evaluate(intrinsic_value, market_price)
         result["minimum_margin"] = minimum_margin
         result["is_undervalued"] = result["margin_of_safety"] >= minimum_margin
@@ -223,7 +294,23 @@ class IntrinsicValue:
     def __init__(self):
         pass
 
-    def evaluate(self, fcf: float, growth_rate: float, discount_rate: float, terminal_growth_rate: float, shares_outstanding: int, net_debt: float, years: int = DEFAULT_INTRINSIC_VALUE_YEARS) -> dict:
+    def evaluate(
+        self,
+        fcf: Optional[float] = None,
+        growth_rate: Optional[float] = None,
+        discount_rate: Optional[float] = None,
+        terminal_growth_rate: float = 0.02,
+        shares_outstanding: Optional[int] = None,
+        net_debt: Optional[float] = None,
+        years: int = DEFAULT_INTRINSIC_VALUE_YEARS,
+        ticker: str = "",
+    ) -> dict:
+        if ticker and any(value is None for value in (fcf, growth_rate, discount_rate, shares_outstanding, net_debt)):
+            return IntrinsicValueEstimation().evaluate(ticker=ticker, terminal_growth_rate=terminal_growth_rate, years=years)
+
+        if any(value is None for value in (fcf, growth_rate, discount_rate, shares_outstanding, net_debt)):
+            raise ValueError("fcf, growth_rate, discount_rate, shares_outstanding, and net_debt are required")
+
         return IntrinsicValueEstimation().evaluate(
             fcf=fcf,
             growth_rate=growth_rate,

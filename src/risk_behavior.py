@@ -39,9 +39,15 @@ def fetch_sec_10k_footnotes(ticker: str) -> str:
         footnotes = fetch_filing_section(
             ticker,
             form="10-K",
-            start_markers=("notes to consolidated financial statements", "notes to financial statements"),
+            start_markers=(
+                "notes to consolidated financial statements",
+                "notes to financial statements",
+                "notes to consolidated and combined financial statements",
+                "note 1. business and summary of significant accounting policies",
+            ),
             end_markers=("item 9", "changes in and disagreements with accountants"),
             max_chars=20000,
+            prefer_notes_body=True,
         )
         if footnotes:
             return footnotes

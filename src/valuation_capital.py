@@ -1,8 +1,9 @@
 import json
 import requests
 import yfinance as yf
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from evaluator_config import DEFAULT_INTRINSIC_VALUE_YEARS, DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL, RISK_FREE_RATE_FALLBACK
+from sec_data import fetch_filing_keyword_context, fetch_filing_section
 from evaluator_thresholds import (
     CAPITAL_ALLOCATION_STRONG_FCF_TO_DEBT_MIN,
     DEEP_DISCOUNT_MARGIN_MIN,
@@ -94,15 +95,55 @@ def fetch_financial_data(ticker_symbol: str) -> Dict[str, Any]:
         "total_debt": debt
     }
 
+
+def fetch_current_market_price(ticker_symbol: str) -> float:
+    ticker = yf.Ticker(ticker_symbol)
+    info = ticker.info or {}
+    current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+    if current_price:
+        return float(current_price)
+
+    history = ticker.history(period="5d")
+    if not history.empty and "Close" in history:
+        return float(history["Close"].dropna().iloc[-1])
+
+    raise ValueError(f"No current market price available for {ticker_symbol}")
+
 def fetch_management_commentary(ticker_symbol: str) -> str:
     """
-    Fetches recent management commentary (using longBusinessSummary as a fallback).
+    Fetches real SEC management commentary relevant to repurchases or capital allocation.
     """
-    ticker = yf.Ticker(ticker_symbol)
-    summary = ticker.info.get("longBusinessSummary", "")
-    if summary:
-        return summary
-    return "No management commentary or business summary available."
+    keyword_sets = (
+        ("10-K", ("share repurchase", "share repurchases", "stock repurchase", "repurchase program", "capital allocation", "returned to shareholders", "intrinsic value")),
+        ("10-Q", ("share repurchase", "share repurchases", "stock repurchase", "repurchase program", "capital allocation", "returned to shareholders", "intrinsic value")),
+        ("8-K", ("share repurchase", "earnings release", "results of operations and financial condition", "capital allocation")),
+    )
+
+    for form, keywords in keyword_sets:
+        try:
+            commentary = fetch_filing_keyword_context(
+                ticker_symbol,
+                form=form,
+                keywords=keywords,
+                context_chars=1600,
+                max_matches=3,
+                max_chars=8000,
+            )
+            if commentary:
+                return commentary
+        except Exception:
+            continue
+
+    try:
+        return fetch_filing_section(
+            ticker_symbol,
+            form="10-K",
+            start_markers=("item 7.", "management's discussion and analysis", "management s discussion and analysis"),
+            end_markers=("item 7a.", "item 8."),
+            max_chars=12000,
+        )
+    except Exception:
+        return "No SEC management commentary available."
 
 
 # --- DCF VALUATION ---
@@ -114,7 +155,7 @@ def calculate_dcf(
     terminal_growth_rate: float, 
     shares_outstanding: int, 
     net_debt: float, 
-    years: int = 10
+    years: int = DEFAULT_INTRINSIC_VALUE_YEARS
 ) -> Dict[str, float]:
     """
     Calculates Intrinsic Value using a pure Python Discounted Cash Flow (DCF) model.
@@ -267,7 +308,31 @@ class IntrinsicValueEstimation:
     def __init__(self):
         pass
 
-    def evaluate(self, fcf: float, growth_rate: float, discount_rate: float, terminal_growth_rate: float, shares_outstanding: int, net_debt: float, years: int = DEFAULT_INTRINSIC_VALUE_YEARS) -> dict:
+    def evaluate(
+        self,
+        fcf: Optional[float] = None,
+        growth_rate: Optional[float] = None,
+        discount_rate: Optional[float] = None,
+        terminal_growth_rate: float = 0.02,
+        shares_outstanding: Optional[int] = None,
+        net_debt: Optional[float] = None,
+        years: int = DEFAULT_INTRINSIC_VALUE_YEARS,
+        ticker: str = "",
+    ) -> dict:
+        current_market_price = None
+        if ticker and any(value is None for value in (fcf, growth_rate, discount_rate, shares_outstanding, net_debt)):
+            financials = fetch_financial_data(ticker)
+            risk_free_rate = fetch_risk_free_rate()
+            fcf = float(financials["recent_free_cash_flow"])
+            growth_rate = float(financials["historical_fcf_growth_rate"])
+            discount_rate = max(risk_free_rate + 0.05, 0.09)
+            shares_outstanding = int(financials["shares_outstanding"])
+            net_debt = float(financials["total_debt"] - financials["cash_and_equivalents"])
+            current_market_price = fetch_current_market_price(ticker)
+
+        if any(value is None for value in (fcf, growth_rate, discount_rate, shares_outstanding, net_debt)):
+            raise ValueError("fcf, growth_rate, discount_rate, shares_outstanding, and net_debt are required")
+
         projected_fcfs = []
         current_fcf = fcf
         
@@ -286,13 +351,18 @@ class IntrinsicValueEstimation:
         equity_value = enterprise_value - net_debt
         value_per_share = equity_value / shares_outstanding if shares_outstanding > 0 else 0
         
-        return {
+        result = {
             "pv_of_fcf": pv_of_fcf,
             "pv_of_terminal_value": pv_of_tv,
             "enterprise_value": enterprise_value,
             "equity_value": equity_value,
             "intrinsic_value_per_share": value_per_share
         }
+        if ticker:
+            result["ticker"] = ticker
+        if current_market_price is not None:
+            result["market_price"] = current_market_price
+        return result
 
     def _helper_method(self):
         pass
@@ -304,7 +374,20 @@ class MarginOfSafety:
     def __init__(self):
         pass
 
-    def evaluate(self, intrinsic_value: float, market_price: float) -> dict:
+    def evaluate(
+        self,
+        intrinsic_value: Optional[float] = None,
+        market_price: Optional[float] = None,
+        ticker: str = "",
+    ) -> dict:
+        if ticker and (intrinsic_value is None or market_price is None):
+            intrinsic_result = IntrinsicValueEstimation().evaluate(ticker=ticker)
+            intrinsic_value = intrinsic_result["intrinsic_value_per_share"]
+            market_price = intrinsic_result.get("market_price") or fetch_current_market_price(ticker)
+
+        if intrinsic_value is None or market_price is None:
+            raise ValueError("intrinsic_value and market_price are required")
+
         if intrinsic_value <= 0:
             raise ValueError("intrinsic_value must be positive")
 
@@ -329,7 +412,20 @@ class TheRelationshipBetweenPurchasePriceAndIntrinsicValue:
     def __init__(self):
         pass
 
-    def evaluate(self, intrinsic_value: float, market_price: float) -> dict:
+    def evaluate(
+        self,
+        intrinsic_value: Optional[float] = None,
+        market_price: Optional[float] = None,
+        ticker: str = "",
+    ) -> dict:
+        if ticker and (intrinsic_value is None or market_price is None):
+            mos = MarginOfSafety().evaluate(ticker=ticker)
+            intrinsic_value = mos["intrinsic_value"]
+            market_price = mos["market_price"]
+
+        if intrinsic_value is None or market_price is None:
+            raise ValueError("intrinsic_value and market_price are required")
+
         margin = MarginOfSafety().evaluate(intrinsic_value, market_price)["margin_of_safety"]
 
         verdict = "fairly_priced"
@@ -362,20 +458,34 @@ class CapitalAllocationAnalysis:
 
     def evaluate(
         self,
-        recent_free_cash_flow: float,
-        total_debt: float,
-        cash_and_equivalents: float,
+        recent_free_cash_flow: Optional[float] = None,
+        total_debt: Optional[float] = None,
+        cash_and_equivalents: Optional[float] = None,
+        ticker: str = "",
         commentary: str = "",
     ) -> dict:
+        if ticker and any(value is None for value in (recent_free_cash_flow, total_debt, cash_and_equivalents)):
+            financials = fetch_financial_data(ticker)
+            recent_free_cash_flow = float(financials["recent_free_cash_flow"])
+            total_debt = float(financials["total_debt"])
+            cash_and_equivalents = float(financials["cash_and_equivalents"])
+
+        if recent_free_cash_flow is None or total_debt is None or cash_and_equivalents is None:
+            raise ValueError("recent_free_cash_flow, total_debt, and cash_and_equivalents are required")
+
         net_cash = cash_and_equivalents - total_debt
         balance_sheet = "net_cash" if net_cash >= 0 else "net_debt"
         fcf_to_debt = recent_free_cash_flow / total_debt if total_debt > 0 else None
 
-        buyback_analysis = ShareBuybackAnalysis().evaluate("N/A", commentary) if commentary else {
+        buyback_analysis = {
             "buyback_strategy": "Unknown",
             "mentions_intrinsic_value": False,
             "analysis_summary": "No commentary provided."
         }
+        if commentary:
+            buyback_analysis = ShareBuybackAnalysis().evaluate(ticker or "N/A", commentary)
+        elif ticker:
+            buyback_analysis = ShareBuybackAnalysis().evaluate(ticker)
 
         discipline = "moderate"
         if recent_free_cash_flow > 0 and (fcf_to_debt is None or fcf_to_debt >= CAPITAL_ALLOCATION_STRONG_FCF_TO_DEBT_MIN):
@@ -405,7 +515,20 @@ class ShareBuybackAnalysis:
     def __init__(self):
         pass
 
-    def evaluate(self, ticker: str, commentary: str) -> dict:
+    def evaluate(self, ticker: str, commentary: str = "") -> dict:
+        if not commentary:
+            from sec_data import fetch_filing_section
+            try:
+                commentary = fetch_filing_section(
+                    ticker,
+                    form="10-K",
+                    start_markers=("item 7.", "management's discussion"),
+                    end_markers=("item 8.", "financial statements"),
+                    max_chars=15000
+                )
+            except Exception as e:
+                return normalize_buyback_analysis({"buyback_strategy": "Unknown", "mentions_intrinsic_value": False, "analysis_summary": f"Failed to fetch MD&A: {e}"})
+
         prompt = f"""
         You are an expert value investor analyzing management's capital allocation strategy for {ticker}.
         Read the following management commentary or business summary on share repurchases: "{commentary}"

@@ -104,6 +104,17 @@ Audit which evaluator implementations rely on hard-coded values, distinguish acc
   - `IntrinsicValueEstimation.evaluate`: default `years=10`.
   - `ShareBuybackAnalysis.evaluate`: hard-coded Ollama URL and model.
 
+### Summary of Implementation Status (The "Pure Math Wrapper" Problem)
+
+Beyond simply moving hard-coded values into `evaluator_config.py` and `evaluator_thresholds.py`, a deeper audit reveals a more fundamental issue: **Out of 49 evaluators, ~38 are currently just "pure math wrappers" or stubs**. 
+
+- They do not fetch SEC data.
+- They do not parse text.
+- They do not use Ollama or local LLMs.
+- They are simply Python functions that require the caller to pass in exact, pre-calculated metrics (e.g., `evaluate(self, employee_turnover: float, insider_ownership: float, restructurings_per_5y: int)`).
+
+Only about **7 evaluators** (such as `LeverageRisk` and `MrMarket`) are implemented end-to-end with actual data fetching. The rest are hard-coded heuristics waiting for a real data pipeline to feed them. Furthermore, the `coverage_check.py` script is fundamentally flawed as it only checks for the presence of an `evaluate` method, not whether that method actually implements the required fetching and NLP logic.
+
 - `src/management_governance.py`
   - `ManagementEvaluation.__init__`: hard-coded model and host defaults.
   - `ManagementEvaluation._fetch_earnings_call_transcript`: simulated transcript text with fixed claims and `$2B` buyback.

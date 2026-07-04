@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional
 import yfinance as yf
 import requests
 from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL
+from sec_data import fetch_filing_keyword_context
 from evaluator_thresholds import (
     AVOID_INDUSTRY_COMMODITY_EXPOSURE_MIN,
     AVOID_INDUSTRY_LEVERAGE_RATIO_MIN,
@@ -69,32 +70,33 @@ def fetch_industry_data(ticker: str, industry_type: str) -> Dict[str, Any]:
             "totalRevenue": info.get('totalRevenue'),
             "ebitdaMargins": info.get('ebitdaMargins'),
         }
-        fallback_text = info.get('longBusinessSummary', '')
     except Exception as e:
         print(f"Error fetching yfinance data for {ticker}: {e}")
-        fallback_text = ""
 
-    # Attempt SEC EDGAR fetch
-    headers = {"User-Agent": "DataCollector/1.0 (contact@example.com)"}
     sec_text = ""
-    try:
-        print(f"Attempting to fetch filings for {ticker} from SEC EDGAR...")
-        mapping = requests.get("https://www.sec.gov/files/company_tickers.json", headers=headers).json()
-        cik_str = next((str(v["cik_str"]).zfill(10) for v in mapping.values() if v["ticker"].upper() == ticker.upper()), None)
-        
-        if cik_str:
-            sub_resp = requests.get(f"https://data.sec.gov/submissions/CIK{cik_str}.json", headers=headers)
-            sub_resp.raise_for_status()
-            print(f"Successfully found SEC filings for {ticker} (CIK: {cik_str}).")
-            print("Parsing exact regulatory/reserve text from raw HTML is complex.")
-            print("Falling back to yfinance business summary.")
-            sec_text = fallback_text
-        else:
-            print(f"Could not find CIK for {ticker}. Falling back to yfinance summary.")
-            sec_text = fallback_text
-    except Exception as e:
-        print(f"SEC EDGAR fetch failed: {e}. Falling back to yfinance summary.")
-        sec_text = fallback_text
+    keyword_map = {
+        "bank": ("tier 1 capital", "common equity tier 1", "stress test", "capital adequacy", "regulatory capital"),
+        "banking": ("tier 1 capital", "common equity tier 1", "stress test", "capital adequacy", "regulatory capital"),
+        "insurance": ("reserve development", "loss reserves", "claims reserves", "adverse development", "favorable development", "incurred but not reported"),
+        "general": (),
+    }
+
+    keywords = keyword_map.get(industry_type.lower(), ())
+    if keywords:
+        for form in ("10-K", "10-Q"):
+            try:
+                sec_text = fetch_filing_keyword_context(
+                    ticker,
+                    form=form,
+                    keywords=keywords,
+                    context_chars=1600,
+                    max_matches=3,
+                    max_chars=8000,
+                )
+                if sec_text:
+                    break
+            except Exception as e:
+                print(f"SEC EDGAR fetch failed for {ticker} {form}: {e}")
 
     if industry_type.lower() == "bank":
         result["regulatory_text"] = sec_text
@@ -166,9 +168,7 @@ class Insurance:
         return self._query_ollama(prompt, str(data)) or {}
 
     def _fetch_industry_data(self, ticker: str, industry_type: str) -> dict:
-        import yfinance as yf
-        info = yf.Ticker(ticker).info
-        return {"profitMargins": info.get("profitMargins"), "businessSummary": info.get("longBusinessSummary")}
+        return fetch_industry_data(ticker, industry_type)
 
     def _query_ollama(self, prompt: str, context: str) -> dict:
         import requests, json
@@ -253,9 +253,7 @@ class Banking:
         return self._query_ollama(prompt, str(data)) or {}
 
     def _fetch_industry_data(self, ticker: str, industry_type: str) -> dict:
-        import yfinance as yf
-        info = yf.Ticker(ticker).info
-        return {"returnOnAssets": info.get("returnOnAssets"), "returnOnEquity": info.get("returnOnEquity"), "businessSummary": info.get("longBusinessSummary")}
+        return fetch_industry_data(ticker, industry_type)
 
     def _query_ollama(self, prompt: str, context: str) -> dict:
         import requests, json

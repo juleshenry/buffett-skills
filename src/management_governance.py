@@ -14,7 +14,7 @@ from evaluator_thresholds import (
     GOVERNANCE_INSIDER_OWNERSHIP_MIN,
     GOVERNANCE_STRONG_SCORE_MIN,
 )
-from sec_data import fetch_filing_section
+from sec_data import fetch_filing_keyword_context, fetch_filing_section
 
 
 def analyze_management_governance(ticker: str, transcript: Optional[str] = None, proxy_statement: Optional[str] = None) -> str:
@@ -75,7 +75,28 @@ class ManagementGovernanceAnalyzer:
             return {"error": f"Unexpected error: {str(e)}"}
 
     def _fetch_earnings_call_transcript(self, ticker: str) -> str:
-        raise NotImplementedError("Earnings call transcript retrieval is not implemented. Provide transcript data from a real source.")
+        keyword_sets = (
+            ("8-K", ("conference call", "earnings call", "prepared remarks", "question-and-answer", "results of operations and financial condition")),
+            ("10-Q", ("results of operations", "liquidity and capital resources", "capital allocation")),
+            ("10-K", ("results of operations", "liquidity and capital resources", "capital allocation")),
+        )
+
+        for form, keywords in keyword_sets:
+            try:
+                commentary = fetch_filing_keyword_context(
+                    ticker,
+                    form=form,
+                    keywords=keywords,
+                    context_chars=1600,
+                    max_matches=3,
+                    max_chars=9000,
+                )
+                if commentary:
+                    return commentary
+            except Exception:
+                continue
+
+        raise RuntimeError(f"No SEC management commentary available for {ticker}.")
 
     def _fetch_sec_def_14a(self, ticker: str) -> str:
         return fetch_filing_section(
@@ -199,7 +220,10 @@ class ManagementEvaluation:
             return {"error": str(e), "response": f"Error connecting to Ollama: {e}"}
 
     def _fetch_earnings_call_transcript(self, ticker: str) -> str:
-        raise NotImplementedError("Earnings call transcript retrieval is not implemented. Provide transcript data from a real source.")
+        return ManagementGovernanceAnalyzer(
+            ollama_model=self.ollama_model,
+            ollama_host=self.ollama_host,
+        )._fetch_earnings_call_transcript(ticker)
 
     def _fetch_sec_def_14a(self, ticker: str) -> str:
         return fetch_filing_section(

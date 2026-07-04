@@ -3,6 +3,8 @@ import requests
 import json
 from typing import Dict, Any
 import pandas as pd
+from investment_philosophy import fetch_price_comparison_data
+from sec_data import fetch_filing_section
 from evaluator_config import (
     DEFAULT_CIRCLE_OF_COMPETENCE_TEMPERATURE,
     DEFAULT_INVERSION_TEMPERATURE,
@@ -30,15 +32,35 @@ from evaluator_thresholds import (
 
 def fetch_company_info(ticker: str) -> Dict[str, Any]:
     info = yf.Ticker(ticker).info
+    description = ""
+    description_source = "yfinance"
+
+    try:
+        description = fetch_filing_section(
+            ticker,
+            form="10-K",
+            start_markers=("item 1.", "business", "our business"),
+            end_markers=("item 1a.", "risk factors"),
+            max_chars=12000,
+        )
+        if description:
+            description_source = "sec_10k_item_1"
+    except Exception:
+        description = ""
+
+    if not description:
+        description = info.get("longBusinessSummary", "")
+
     return {
         "ticker": ticker,
         "name": info.get("longName") or info.get("shortName") or ticker,
-        "description": info.get("longBusinessSummary", "")
+        "description": description,
+        "description_source": description_source,
     }
 
 
 def evaluate_simplicity_with_ollama(company_name: str, description: str, model: str = DEFAULT_OLLAMA_MODEL) -> dict:
-    return CircleOfCompetence().evaluate(company_name, description, model=model)
+    return CircleOfCompetence().evaluate(ticker=company_name, company_name=company_name, description=description, model=model)
 
 class CircleOfCompetence:
     """
@@ -47,7 +69,20 @@ class CircleOfCompetence:
     def __init__(self):
         pass
 
-    def evaluate(self, company_name: str, description: str, model: str = DEFAULT_OLLAMA_MODEL) -> dict:
+    def evaluate(self, ticker: str, company_name: str = "", description: str = "", model: str = DEFAULT_OLLAMA_MODEL) -> dict:
+        company_name = company_name or ticker
+        if not description:
+            try:
+                description = fetch_filing_section(
+                    ticker,
+                    form="10-K",
+                    start_markers=("item 1.", "item 1. business"),
+                    end_markers=("item 1a.", "risk factors"),
+                    max_chars=8000
+                )
+            except Exception as e:
+                return {"inside_circle": False, "confidence": 0, "explanation": f"Failed to fetch SEC description: {e}"}
+
         prompt = f"""
         You are a disciplined value investor applying Buffett's circle of competence.
         Company: {company_name}
@@ -97,10 +132,23 @@ class Inversion:
     def __init__(self):
         pass
 
-    def evaluate(self, company_name: str, description: str, model: str = DEFAULT_OLLAMA_MODEL) -> str:
+    def evaluate(self, ticker: str, company_name: str = "", description: str = "", model: str = DEFAULT_OLLAMA_MODEL) -> str:
         """
         Forces the LLM to act as a skeptic and find the 3 most likely ways this company fails.
         """
+        company_name = company_name or ticker
+        if not description:
+            try:
+                description = fetch_filing_section(
+                    ticker,
+                    form="10-K",
+                    start_markers=("item 1.", "item 1. business"),
+                    end_markers=("item 1a.", "risk factors"),
+                    max_chars=8000
+                )
+            except Exception as e:
+                return f"Failed to fetch SEC description: {e}"
+
         prompt = f"""
         You are Charlie Munger, a brilliant, skeptical value investor. 
         I am considering investing in {company_name}. 
@@ -184,7 +232,23 @@ class LongtermOrientation:
     def __init__(self):
         pass
 
-    def evaluate(self, stock_cagr: float, benchmark_cagr: float, years: float) -> dict:
+    def evaluate(
+        self,
+        stock_cagr: float | None = None,
+        benchmark_cagr: float | None = None,
+        years: float | None = None,
+        ticker: str = "",
+        benchmark: str = "^GSPC",
+    ) -> dict:
+        if ticker and (stock_cagr is None or benchmark_cagr is None or years is None):
+            price_data = fetch_price_comparison_data(ticker, years=int(years or LONG_TERM_STRONG_YEARS_MIN), benchmark=benchmark)
+            stock_cagr = price_data["stock_cagr"]
+            benchmark_cagr = price_data["benchmark_cagr"]
+            years = price_data["period_years"]
+
+        if stock_cagr is None or benchmark_cagr is None or years is None:
+            raise ValueError("stock_cagr, benchmark_cagr, and years are required")
+
         if years <= 0:
             raise ValueError("years must be positive")
 

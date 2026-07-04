@@ -18,6 +18,8 @@ from thinking_frameworks import IndependentThinking, LongtermOrientation, MrMark
 from valuation_capital import CapitalAllocationAnalysis, MarginOfSafety, TheRelationshipBetweenPurchasePriceAndIntrinsicValue
 from valuation_capital import DividendsRetainedEarningsAndTaxEfficiency
 from valuation_capital import SpecialInvestmentInstruments
+from evaluator_config import DEFAULT_INTRINSIC_VALUE_YEARS
+from sec_data import extract_keyword_context
 from risk_behavior import ValueTraps, WhenToSellClearCriteria
 from risk_behavior import CommonBehavioralBiasesPsychologicalTrapsInInvesting, DerivativesRisk
 from financial_metrics import CorePrincipleSeeThroughAccountingToEconomicReality, OwnerEarnings, normalize_capex_breakdown
@@ -25,6 +27,7 @@ from industry_playbooks import ConsumerBrandsRetail, EnergyUtilities, Industries
 import investment_philosophy
 import management_governance
 import thinking_frameworks
+import valuation_capital
 from management_governance import ManagementEvaluation
 from risk_behavior import LeverageRisk
 from valuation_capital import normalize_buyback_analysis
@@ -76,10 +79,35 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertAlmostEqual(result["cash_conversion"], 1.5)
         self.assertAlmostEqual(result["free_cash_flow"], 130.0)
 
+    @patch("financial_metrics.fetch_deep_financials")
+    def test_key_financial_metrics_fetches_real_financials(self, mock_fetch_financials):
+        mock_fetch_financials.return_value = {
+            "total_revenue": 1000.0,
+            "net_income": 120.0,
+            "operating_cash_flow": 180.0,
+            "capex_total": -50.0,
+        }
+
+        result = KeyFinancialMetrics().evaluate(ticker="AAPL")
+        self.assertAlmostEqual(result["profit_margin"], 0.12)
+        mock_fetch_financials.assert_called_once_with("AAPL")
+
     def test_long_term_orientation(self):
         result = LongtermOrientation().evaluate(stock_cagr=0.14, benchmark_cagr=0.09, years=7)
         self.assertEqual(result["long_term_orientation"], "strong")
         self.assertAlmostEqual(result["excess_return"], 0.05)
+
+    @patch("thinking_frameworks.fetch_price_comparison_data")
+    def test_long_term_orientation_fetches_real_price_data_for_ticker(self, mock_price_data):
+        mock_price_data.return_value = {
+            "stock_cagr": 0.14,
+            "benchmark_cagr": 0.09,
+            "period_years": 7.0,
+        }
+
+        result = LongtermOrientation().evaluate(ticker="AAPL")
+        self.assertEqual(result["long_term_orientation"], "strong")
+        mock_price_data.assert_called_once()
 
     def test_opportunity_cost_awareness(self):
         result = OpportunityCostAwareness().evaluate(
@@ -100,6 +128,43 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["balance_sheet_position"], "net_debt")
         self.assertAlmostEqual(result["fcf_to_debt"], 0.375)
         self.assertEqual(result["capital_allocation_discipline"], "strong")
+
+    @patch("valuation_capital.ShareBuybackAnalysis.evaluate")
+    def test_capital_allocation_analysis_fetches_buyback_commentary_for_ticker(self, mock_evaluate):
+        mock_evaluate.return_value = {
+            "buyback_strategy": "Opportunistic/Value-Based",
+            "mentions_intrinsic_value": True,
+            "analysis_summary": "Repurchases occur when shares are undervalued.",
+        }
+
+        result = CapitalAllocationAnalysis().evaluate(
+            recent_free_cash_flow=300.0,
+            total_debt=800.0,
+            cash_and_equivalents=500.0,
+            ticker="AAPL",
+        )
+
+        mock_evaluate.assert_called_once_with("AAPL")
+        self.assertEqual(result["buyback_analysis"]["buyback_strategy"], "Opportunistic/Value-Based")
+
+    @patch("valuation_capital.ShareBuybackAnalysis.evaluate")
+    def test_capital_allocation_analysis_prefers_provided_commentary(self, mock_evaluate):
+        mock_evaluate.return_value = {
+            "buyback_strategy": "Systematic",
+            "mentions_intrinsic_value": False,
+            "analysis_summary": "Management uses a standing authorization.",
+        }
+
+        result = CapitalAllocationAnalysis().evaluate(
+            recent_free_cash_flow=300.0,
+            total_debt=800.0,
+            cash_and_equivalents=500.0,
+            ticker="AAPL",
+            commentary="Board approved a standing repurchase program.",
+        )
+
+        mock_evaluate.assert_called_once_with("AAPL", "Board approved a standing repurchase program.")
+        self.assertEqual(result["buyback_analysis"]["buyback_strategy"], "Systematic")
 
     def test_lookthrough_earnings(self):
         result = LookthroughEarnings().evaluate(
@@ -155,6 +220,17 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
         self.assertTrue(result["market_efficiency_supported"])
 
+    @patch("investment_philosophy.fetch_price_comparison_data")
+    def test_efficient_market_theory_fetches_real_price_data_for_ticker(self, mock_price_data):
+        mock_price_data.return_value = {
+            "stock_cagr": 0.09,
+            "benchmark_cagr": 0.08,
+            "tracking_error": 0.03,
+        }
+        result = EfficientMarketTheory().evaluate(ticker="AAPL")
+        self.assertTrue(result["market_efficiency_supported"])
+        mock_price_data.assert_called_once()
+
     def test_market_forecasting(self):
         result = MarketForecasting().evaluate(
             forecast_return=0.10,
@@ -172,6 +248,13 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertTrue(result["is_undervalued"])
         self.assertAlmostEqual(result["margin_of_safety"], 0.30)
 
+    @patch("investment_philosophy.IntrinsicValue.evaluate")
+    def test_undervalued_margin_of_safety_fetches_real_intrinsic_value_for_ticker(self, mock_intrinsic):
+        mock_intrinsic.return_value = {"intrinsic_value_per_share": 100.0, "market_price": 70.0}
+        result = UndervaluedMarginOfSafety().evaluate(ticker="AAPL")
+        self.assertTrue(result["is_undervalued"])
+        mock_intrinsic.assert_called_once_with(ticker="AAPL")
+
     def test_intrinsic_value_wrapper(self):
         result = IntrinsicValue().evaluate(
             fcf=100.0,
@@ -184,6 +267,75 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
         self.assertIn("intrinsic_value_per_share", result)
         self.assertGreater(result["intrinsic_value_per_share"], 0)
+
+    @patch("investment_philosophy.IntrinsicValueEstimation.evaluate")
+    def test_intrinsic_value_fetches_real_inputs_for_ticker(self, mock_estimate):
+        mock_estimate.return_value = {"intrinsic_value_per_share": 123.0, "market_price": 100.0}
+        result = IntrinsicValue().evaluate(ticker="AAPL")
+        self.assertEqual(result["intrinsic_value_per_share"], 123.0)
+        mock_estimate.assert_called_once_with(ticker="AAPL", terminal_growth_rate=0.02, years=DEFAULT_INTRINSIC_VALUE_YEARS)
+
+    @patch("valuation_capital.fetch_current_market_price")
+    @patch("valuation_capital.fetch_risk_free_rate")
+    @patch("valuation_capital.fetch_financial_data")
+    def test_intrinsic_value_estimation_fetches_real_company_data(self, mock_financials, mock_risk_free, mock_market_price):
+        mock_financials.return_value = {
+            "recent_free_cash_flow": 100.0,
+            "historical_fcf_growth_rate": 0.05,
+            "shares_outstanding": 10,
+            "cash_and_equivalents": 20.0,
+            "total_debt": 50.0,
+        }
+        mock_risk_free.return_value = 0.04
+        mock_market_price.return_value = 80.0
+
+        result = valuation_capital.IntrinsicValueEstimation().evaluate(ticker="AAPL", years=5)
+
+        self.assertEqual(result["ticker"], "AAPL")
+        self.assertEqual(result["market_price"], 80.0)
+        self.assertIn("intrinsic_value_per_share", result)
+
+    @patch("valuation_capital.IntrinsicValueEstimation.evaluate")
+    def test_margin_of_safety_fetches_real_values_for_ticker(self, mock_estimate):
+        mock_estimate.return_value = {"intrinsic_value_per_share": 100.0, "market_price": 70.0}
+        result = MarginOfSafety().evaluate(ticker="AAPL")
+        self.assertAlmostEqual(result["margin_of_safety"], 0.30)
+        mock_estimate.assert_called_once_with(ticker="AAPL")
+
+    @patch("valuation_capital.MarginOfSafety.evaluate")
+    def test_purchase_price_relationship_fetches_real_values_for_ticker(self, mock_mos):
+        mock_mos.side_effect = [
+            {"intrinsic_value": 100.0, "market_price": 72.0},
+            {"margin_of_safety": 0.28},
+        ]
+        result = TheRelationshipBetweenPurchasePriceAndIntrinsicValue().evaluate(ticker="AAPL")
+        self.assertEqual(result["purchase_price_verdict"], "deep_discount")
+
+    @patch("valuation_capital.fetch_financial_data")
+    @patch("valuation_capital.ShareBuybackAnalysis.evaluate")
+    def test_capital_allocation_analysis_fetches_real_financials_for_ticker(self, mock_evaluate, mock_financials):
+        mock_financials.return_value = {
+            "recent_free_cash_flow": 300.0,
+            "total_debt": 800.0,
+            "cash_and_equivalents": 500.0,
+        }
+        mock_evaluate.return_value = {
+            "buyback_strategy": "Opportunistic/Value-Based",
+            "mentions_intrinsic_value": True,
+            "analysis_summary": "Repurchases occur when shares are undervalued.",
+        }
+
+        result = CapitalAllocationAnalysis().evaluate(ticker="AAPL")
+
+        self.assertEqual(result["balance_sheet_position"], "net_debt")
+        self.assertAlmostEqual(result["fcf_to_debt"], 0.375)
+        mock_financials.assert_called_once_with("AAPL")
+
+    def test_calculate_dcf_uses_shared_default_horizon(self):
+        self.assertEqual(
+            valuation_capital.calculate_dcf.__defaults__[-1],
+            DEFAULT_INTRINSIC_VALUE_YEARS,
+        )
 
     def test_goodwill_quality(self):
         result = GoodwillEconomicGoodwillVsAccountingGoodwill().evaluate(
@@ -211,6 +363,18 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
         self.assertAlmostEqual(result["free_cash_flow"], 110.0)
         self.assertEqual(result["economic_reality_assessment"], "cash_backed")
+
+    @patch("financial_metrics.fetch_deep_financials")
+    def test_economic_reality_fetches_real_financials(self, mock_fetch_financials):
+        mock_fetch_financials.return_value = {
+            "net_income": 100.0,
+            "operating_cash_flow": 130.0,
+            "capex_total": -20.0,
+        }
+
+        result = CorePrincipleSeeThroughAccountingToEconomicReality().evaluate(ticker="AAPL")
+        self.assertAlmostEqual(result["free_cash_flow"], 110.0)
+        mock_fetch_financials.assert_called_once_with("AAPL")
 
     def test_dividends_tax_efficiency(self):
         result = DividendsRetainedEarningsAndTaxEfficiency().evaluate(
@@ -339,8 +503,10 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["red_flag_count"], 3)
         self.assertTrue(result["avoid_industry"])
 
+    @patch("thinking_frameworks.fetch_filing_section")
     @patch("thinking_frameworks.yf.Ticker")
-    def test_fetch_company_info(self, mock_ticker):
+    def test_fetch_company_info(self, mock_ticker, mock_fetch_section):
+        mock_fetch_section.side_effect = Exception("Network error")
         mock_ticker.return_value.info = {
             "longName": "Yum! Brands, Inc.",
             "longBusinessSummary": "Operates restaurant brands.",
@@ -366,9 +532,34 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(kwargs["transcript"], "Transcript text")
         self.assertEqual(kwargs["proxy_stmt"], "Proxy text")
 
-    def test_management_evaluation_requires_real_transcript_source(self):
-        with self.assertRaises(NotImplementedError):
-            ManagementEvaluation().evaluate("YUM")
+    @patch("management_governance.fetch_filing_keyword_context")
+    def test_management_evaluation_fetches_sec_commentary(self, mock_fetch_context):
+        mock_fetch_context.return_value = "Management discussed capital allocation and operating conditions."
+        result = ManagementEvaluation()._fetch_earnings_call_transcript("YUM")
+        self.assertIn("capital allocation", result)
+
+    @patch("thinking_frameworks.fetch_filing_section")
+    @patch("thinking_frameworks.yf.Ticker")
+    def test_fetch_company_info_prefers_sec_business_description(self, mock_ticker, mock_fetch_section):
+        mock_ticker.return_value.info = {
+            "longName": "Yum! Brands, Inc.",
+            "longBusinessSummary": "Fallback summary.",
+        }
+        mock_fetch_section.return_value = "SEC business description"
+        result = thinking_frameworks.fetch_company_info("YUM")
+        self.assertEqual(result["description"], "SEC business description")
+        self.assertEqual(result["description_source"], "sec_10k_item_1")
+
+    @patch("valuation_capital.fetch_filing_keyword_context")
+    def test_fetch_management_commentary_prefers_sec_keyword_context(self, mock_fetch_context):
+        mock_fetch_context.return_value = "The company repurchased shares opportunistically."
+        result = valuation_capital.fetch_management_commentary("YUM")
+        self.assertIn("repurchased shares", result)
+
+    def test_extract_keyword_context_returns_real_snippets(self):
+        text = "Alpha. The company expanded its share repurchase program materially this quarter. Omega."
+        result = extract_keyword_context(text, keywords=("share repurchase",), context_chars=60)
+        self.assertIn("share repurchase program", result)
 
     @patch("management_governance.fetch_filing_section")
     def test_management_evaluation_fetches_real_proxy_section(self, mock_fetch_section):

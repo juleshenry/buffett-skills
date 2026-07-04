@@ -21,6 +21,7 @@ from evaluator_thresholds import (
     INFLATION_MARGIN_CHANGE_FLOOR,
     INFLATION_SPIKE_RATE_MIN,
 )
+from thinking_frameworks import fetch_company_info
 
 # --- Configuration ---
 OLLAMA_API_URL = OLLAMA_GENERATE_URL
@@ -156,14 +157,13 @@ def overlay_margins_on_inflation(margins_df: pd.DataFrame, inflation_df: pd.Data
     return merged_df
 
 def infer_business_details(ticker: str, model: str = DEFAULT_MODEL) -> dict:
-    """Use yfinance to extract business summary and use Ollama to infer products and competitors."""
+    """Use SEC business description where available, then infer products and competitors with Ollama."""
     logger.info(f"Extracting business details for {ticker}...")
-    
+
     try:
-        t = yf.Ticker(ticker)
-        info = t.info
-        company_name = info.get("longName", ticker)
-        business_summary = info.get("longBusinessSummary", "")
+        company_info = fetch_company_info(ticker)
+        company_name = company_info.get("name", ticker)
+        business_summary = company_info.get("description", "")
     except Exception as e:
         logger.error(f"Error fetching ticker info for {ticker}: {e}")
         return {"company_name": ticker, "products": [], "competitors": []}
@@ -187,6 +187,7 @@ def infer_business_details(ticker: str, model: str = DEFAULT_MODEL) -> dict:
     data = _query_ollama_json(prompt, model)
     return {
         "company_name": company_name,
+        "business_description": business_summary,
         "products": data.get("products", []),
         "competitors": data.get("competitors", [])
     }
@@ -280,17 +281,34 @@ class EconomicMoat:
         self.OLLAMA_API_URL = OLLAMA_GENERATE_URL
         self.DEFAULT_MODEL = DEFAULT_OLLAMA_MODEL
 
-    def evaluate(self, company_name: str, products: list, competitors: list, model: str = DEFAULT_OLLAMA_MODEL) -> dict:
-        products_str = ", ".join(products) if products else "Unknown"
-        competitors_str = ", ".join(competitors) if competitors else "Unknown"
+    def evaluate(self, ticker: str, company_name: str = "", products: list = None, competitors: list = None, model: str = DEFAULT_OLLAMA_MODEL) -> dict:
+        company_name = company_name or ticker
         
+        context_str = ""
+        if products and competitors:
+            products_str = ", ".join(products)
+            competitors_str = ", ".join(competitors)
+            context_str = f"Company Products/Services: {products_str}\nTop 5 Competitors: {competitors_str}"
+        else:
+            from sec_data import fetch_filing_section
+            try:
+                description = fetch_filing_section(
+                    ticker,
+                    form="10-K",
+                    start_markers=("item 1.", "item 1. business"),
+                    end_markers=("item 1a.", "risk factors"),
+                    max_chars=8000
+                )
+                context_str = f"Business Description from SEC 10-K:\n{description}"
+            except Exception as e:
+                return {"moat_type": "Unknown", "justification": f"Failed to fetch SEC description: {e}"}
+
         prompt = f"""
         You are an expert value investor analyzing {company_name}. 
 
-        Company Products/Services: {products_str}
-        Top 5 Competitors: {competitors_str}
+        {context_str}
 
-        Based on these products and competitors, classify the company's business moat into exactly one of these buckets: 
+        Based on this information, classify the company's business moat into exactly one of these buckets: 
         - Brand
         - Switching Costs
         - Network Effect
