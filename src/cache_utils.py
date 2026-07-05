@@ -32,14 +32,17 @@ def _get_cache_key(func, source_fingerprint, *args, **kwargs):
     key_str = f"{func.__name__}:{source_fingerprint}:{repr(args)}:{repr(sorted(kwargs.items()))}"
     return hashlib.md5(key_str.encode("utf-8")).hexdigest()
 
-def disk_cache(days=1):
+def disk_cache(days=1, cache_dir=None):
+    target_dir = Path(cache_dir) if cache_dir else CACHE_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+
     def decorator(func):
         source_fingerprint = _get_source_fingerprint(func)
 
         @wraps(func)
         def wrapper(*args, **kwargs):
             key = _get_cache_key(func, source_fingerprint, *args, **kwargs)
-            cache_file = CACHE_DIR / f"{func.__name__}_{key}.pkl"
+            cache_file = target_dir / f"{func.__name__}_{key}.pkl"
             
             # Check if cache exists and is valid
             if cache_file.exists():

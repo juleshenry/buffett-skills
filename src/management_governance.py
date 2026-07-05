@@ -1,4 +1,5 @@
 import json
+import math
 import urllib.request
 import urllib.error
 import re
@@ -214,6 +215,126 @@ class ManagementEvaluation:
         )
 
 
+_SHARED_PIPELINES: Dict[str, Any] = {}
+
+
+def _get_shared_pipeline(task: str, model: str):
+    """
+    Lazily creates and caches HuggingFace pipelines at module level.
+
+    Evaluator classes are instantiated fresh per ticker in the batch pipeline
+    (run.py calls `cls()` once per heuristic per ticker), so without this cache
+    every one of the 500 S&P tickers would reload the same multi-hundred-MB
+    model weights from disk again just to score a couple of sentences.
+    """
+    key = f"{task}:{model}"
+    if key not in _SHARED_PIPELINES:
+        _SHARED_PIPELINES[key] = pipeline(task, model=model)
+    return _SHARED_PIPELINES[key]
+
+
+def _embed_text(text: str) -> Optional[list[float]]:
+    """
+    Dependency-free sentence embedding: mean-pools FinBERT's token-level hidden
+    states into a single fixed-size vector. Reuses a model already loaded
+    elsewhere in this codebase instead of adding a new embedding dependency.
+    """
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return None
+    try:
+        extractor = _get_shared_pipeline("feature-extraction", "ProsusAI/finbert")
+        token_vectors = extractor(cleaned[:2000])[0]
+        if not token_vectors:
+            return None
+        hidden_size = len(token_vectors[0])
+        pooled = [0.0] * hidden_size
+        for token_vector in token_vectors:
+            for i, value in enumerate(token_vector):
+                pooled[i] += value
+        token_count = len(token_vectors)
+        return [value / token_count for value in pooled]
+    except Exception:
+        return None
+
+
+def _cosine_similarity(vector_a: list[float], vector_b: list[float]) -> float:
+    dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
+    norm_a = math.sqrt(sum(a * a for a in vector_a))
+    norm_b = math.sqrt(sum(b * b for b in vector_b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot_product / (norm_a * norm_b)
+
+
+# Cosine similarities between sentence embeddings tend to cluster tightly
+# (rarely below ~0.5 even for unrelated finance text), so a small difference in
+# raw similarity is amplified before the softmax-style normalization below.
+# Otherwise almost everything would land near 0.5 regardless of content.
+SEMANTIC_TEMPERATURE = 12.0
+
+
+def _semantic_polarity_score(text: str, positive_anchor: str, negative_anchor: str) -> Optional[float]:
+    """
+    Embeds `text` plus two reference anchor phrases, then converts the pair of
+    cosine similarities into a single continuous [0, 1] score via relative
+    (softmax-style) normalization: 1.0 means the text sits closer to
+    `positive_anchor` in vector space, 0.0 means it sits closer to
+    `negative_anchor`.
+
+    This replaces literal keyword-hit counting (e.g. counting occurrences of
+    "restructuring" or "layoffs") with an actual vector-space semantic
+    comparison, so a hedged/negated mention like "no layoffs are planned"
+    lands near the positive anchor instead of tripping a naive keyword
+    counter that only knows the word "layoffs" appeared.
+    """
+    text_vector = _embed_text(text)
+    if text_vector is None:
+        return None
+    positive_vector = _embed_text(positive_anchor)
+    negative_vector = _embed_text(negative_anchor)
+    if positive_vector is None or negative_vector is None:
+        return None
+
+    positive_similarity = _cosine_similarity(text_vector, positive_vector)
+    negative_similarity = _cosine_similarity(text_vector, negative_vector)
+
+    exp_positive = math.exp(positive_similarity * SEMANTIC_TEMPERATURE)
+    exp_negative = math.exp(negative_similarity * SEMANTIC_TEMPERATURE)
+    return exp_positive / (exp_positive + exp_negative)
+
+
+def _normalize_signal(value: float, good_at: float, bad_at: float) -> float:
+    """
+    Linearly projects `value` onto a continuous [0, 1] scale where `good_at`
+    maps to 1.0 and `bad_at` maps to 0.0 (clamped outside that range), instead
+    of collapsing it to a hard pass/fail boolean at a single cutoff. Works
+    whether "higher is better" (good_at > bad_at) or "lower is better"
+    (good_at < bad_at). A value exactly at the historical pass/fail threshold
+    now scores a neutral 0.5 instead of flipping between two extremes.
+    """
+    if good_at == bad_at:
+        return 0.5
+    fraction = (value - bad_at) / (good_at - bad_at)
+    return max(0.0, min(1.0, fraction))
+
+
+RESTRUCTURING_POSITIVE_ANCHOR = (
+    "The company has a stable workforce with no significant restructuring, "
+    "layoffs, or workforce reduction activity."
+)
+RESTRUCTURING_NEGATIVE_ANCHOR = (
+    "The company announced significant restructuring charges, workforce "
+    "reductions, and layoffs."
+)
+TURNOVER_POSITIVE_ANCHOR = (
+    "The company reports low employee turnover and strong employee retention."
+)
+TURNOVER_NEGATIVE_ANCHOR = (
+    "The company reports high employee turnover and workforce instability."
+)
+
+
 class CorporateCulture:
     """
     Heuristic: Corporate Culture
@@ -231,37 +352,50 @@ class CorporateCulture:
             if restructurings_per_5y is None:
                 restructurings_per_5y = culture_inputs["restructurings_per_5y"]
 
-        signal_results = {}
+        # Vector normalization: each raw signal (whatever its native unit or
+        # shape) gets projected onto a comparable [0, 1] "goodness" scale
+        # first, using the historical thresholds as the neutral midpoint.
+        normalized_signals = {}
         if employee_turnover is not None:
-            signal_results["employee_turnover"] = employee_turnover <= CULTURE_EMPLOYEE_TURNOVER_MAX
+            normalized_signals["employee_turnover"] = _normalize_signal(
+                employee_turnover, good_at=0.0, bad_at=CULTURE_EMPLOYEE_TURNOVER_MAX * 2
+            )
         if insider_ownership is not None:
-            signal_results["insider_ownership"] = insider_ownership >= CULTURE_INSIDER_OWNERSHIP_MIN
+            normalized_signals["insider_ownership"] = _normalize_signal(
+                insider_ownership, good_at=CULTURE_INSIDER_OWNERSHIP_MIN * 2, bad_at=0.0
+            )
         if restructurings_per_5y is not None:
-            signal_results["restructurings_per_5y"] = restructurings_per_5y <= CULTURE_RESTRUCTURINGS_MAX
+            normalized_signals["restructurings_per_5y"] = _normalize_signal(
+                restructurings_per_5y, good_at=0.0, bad_at=CULTURE_RESTRUCTURINGS_MAX * 3
+            )
 
         # Require at least ONE signal instead of two, since explicit culture metrics are rare in 10Ks
-        if len(signal_results) < 1:
+        if len(normalized_signals) < 1:
             return {
                 "ticker": ticker,
                 "applicable": False,
                 "reason": "Insufficient explicit culture evidence found; need at least one culture proxy (e.g. insider ownership).",
             }
 
-        positive_signals = sum(1 for passed in signal_results.values() if passed)
-        score = round((positive_signals / len(signal_results)) * 3, 2)
+        # Combine the normalized vector by averaging its components, instead
+        # of counting how many raw values individually clear a cutoff.
+        normalized_vector = list(normalized_signals.values())
+        culture_score_unit = sum(normalized_vector) / len(normalized_vector)
+        culture_score = round(culture_score_unit * 3, 2)
 
         culture = "weak"
-        if positive_signals == len(signal_results):
+        if culture_score_unit >= 0.66:
             culture = "strong"
-        elif positive_signals / len(signal_results) >= 0.5:
+        elif culture_score_unit >= 0.33:
             culture = "stable"
 
         return {
             "employee_turnover": employee_turnover,
             "insider_ownership": insider_ownership,
             "restructurings_per_5y": restructurings_per_5y,
-            "signals_available": len(signal_results),
-            "culture_score": score,
+            "signals_available": len(normalized_signals),
+            "signal_confidence": round(len(normalized_signals) / 3, 2),
+            "culture_score": culture_score,
             "culture_assessment": culture
         }
 
@@ -278,7 +412,7 @@ class CorporateCulture:
         return {
             "insider_ownership": float(info.get("heldPercentInsiders")) if info.get("heldPercentInsiders") is not None else None,
             "employee_turnover": self._estimate_employee_turnover(employee_commentary),
-            "restructurings_per_5y": self._count_restructuring_signals(restructuring_commentary),
+            "restructurings_per_5y": self._estimate_restructuring_severity(restructuring_commentary),
         }
 
     def _fetch_employee_commentary(self, ticker: str) -> str:
@@ -324,42 +458,36 @@ class CorporateCulture:
         percent_match = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:employee\s+)?turnover", text)
         if percent_match:
             return float(percent_match.group(1)) / 100.0
-            
-        try:
-            from evaluator_config import call_ollama_panel_json, DEFAULT_OLLAMA_MODEL
-            prompt = f"Estimate the employee turnover rate (0.0 to 1.0) based on this text. If it is generally low/good, you can estimate 0.10. If high/bad, estimate 0.30. If not mentioned, return null. Return ONLY JSON: {{\"turnover_rate\": float or null}}. Text: {commentary[:3000]}"
-            res = call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL)
-            return res.get("turnover_rate")
-        except Exception:
+
+        # No explicit disclosed rate. Fall back to a semantic (vector-space)
+        # read of the commentary instead of asking a generative LLM to guess
+        # a bare number -- the same qualitative text now maps deterministically
+        # onto a continuous turnover estimate via embedding similarity.
+        stability_score = _semantic_polarity_score(commentary, TURNOVER_POSITIVE_ANCHOR, TURNOVER_NEGATIVE_ANCHOR)
+        if stability_score is None:
+            return None
+        return round((1.0 - stability_score) * CULTURE_EMPLOYEE_TURNOVER_MAX * 2, 4)
+
+    @staticmethod
+    def _looks_like_filing_noise(text: str) -> bool:
+        noise_markers = ("us-gaap:", "member", "2025-12-31", "2024-12-31", "2023-12-31")
+        return sum(marker in text for marker in noise_markers) >= 2
+
+    def _estimate_restructuring_severity(self, commentary: str) -> float | None:
+        text = (commentary or "").strip()
+        if not text:
+            return None
+        if self._looks_like_filing_noise(text.lower()):
             return None
 
-    def _count_restructuring_signals(self, commentary: str) -> int:
-        text = (commentary or "").lower()
-        if not text.strip():
+        # Semantic (vector-space) severity read instead of literal keyword-hit
+        # counting: negated/hedged mentions ("no restructuring is planned")
+        # land near the positive anchor rather than tripping a naive counter
+        # of words like "restructuring" or "layoffs".
+        stability_score = _semantic_polarity_score(text, RESTRUCTURING_POSITIVE_ANCHOR, RESTRUCTURING_NEGATIVE_ANCHOR)
+        if stability_score is None:
             return None
-
-        xbrl_noise_markers = (
-            "us-gaap:",
-            "member",
-            "2025-12-31",
-            "2024-12-31",
-            "2023-12-31",
-        )
-        if sum(marker in text for marker in xbrl_noise_markers) >= 2:
-            return None
-
-        explicit_patterns = (
-            r"restructuring\s+plan",
-            r"restructuring\s+charge",
-            r"announced\s+(?:a\s+)?restructuring",
-            r"workforce\s+reduction",
-            r"laid\s+off",
-            r"layoffs",
-            r"severance\s+costs",
-            r"reorganization\s+plan",
-        )
-        matches = sum(len(re.findall(pattern, text)) for pattern in explicit_patterns)
-        return min(matches, 5) if matches > 0 else None
+        return round((1.0 - stability_score) * CULTURE_RESTRUCTURINGS_MAX * 3, 4)
 
 class AcquisitionLogicAcquisitionCriteria:
     """

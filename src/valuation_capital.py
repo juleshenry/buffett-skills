@@ -479,30 +479,36 @@ class IntrinsicValueEstimation:
         if any(value is None for value in (fcf, growth_rate, discount_rate, shares_outstanding, net_debt)):
             return {"applicable": False, "reason": "Missing required metrics: fcf, growth_rate, discount_rate, shares_outstanding, and net_debt are required"}
 
-        projected_fcfs = []
-        current_fcf = fcf
-        
-        for year in range(1, years + 1):
-            current_fcf *= (1 + growth_rate)
-            projected_fcfs.append(current_fcf)
-            
-        discounted_fcfs = [cf / ((1 + discount_rate) ** idx) for idx, cf in enumerate(projected_fcfs, start=1)]
-        pv_of_fcf = sum(discounted_fcfs)
-        
-        final_year_fcf = projected_fcfs[-1]
-        terminal_value = (final_year_fcf * (1 + terminal_growth_rate)) / (discount_rate - terminal_growth_rate)
-        pv_of_tv = terminal_value / ((1 + discount_rate) ** years)
-        
-        enterprise_value = pv_of_fcf + pv_of_tv
-        equity_value = enterprise_value - net_debt
-        value_per_share = equity_value / shares_outstanding if shares_outstanding > 0 else 0
-        
+        scenarios = self._build_valuation_scenarios(
+            fcf=float(fcf),
+            growth_rate=float(growth_rate),
+            discount_rate=float(discount_rate),
+            terminal_growth_rate=float(terminal_growth_rate),
+            shares_outstanding=int(shares_outstanding),
+            net_debt=float(net_debt),
+            years=years,
+        )
+
+        base_case = scenarios["base"]
+        value_per_share = base_case["intrinsic_value_per_share"]
+        valuation_range = self._build_valuation_range_summary(scenarios)
+        confidence = self._build_valuation_confidence_summary(
+            market_price=current_market_price,
+            base_intrinsic_value=value_per_share,
+            valuation_range=valuation_range,
+            growth_rate=float(growth_rate),
+            discount_rate=float(discount_rate),
+        )
+
         result = {
-            "pv_of_fcf": pv_of_fcf,
-            "pv_of_terminal_value": pv_of_tv,
-            "enterprise_value": enterprise_value,
-            "equity_value": equity_value,
-            "intrinsic_value_per_share": value_per_share
+            "pv_of_fcf": base_case["pv_of_fcf"],
+            "pv_of_terminal_value": base_case["pv_of_terminal_value"],
+            "enterprise_value": base_case["enterprise_value"],
+            "equity_value": base_case["equity_value"],
+            "intrinsic_value_per_share": value_per_share,
+            "valuation_range": valuation_range,
+            "valuation_scenarios": scenarios,
+            "valuation_confidence": confidence,
         }
         if ticker:
             result["ticker"] = ticker
@@ -512,6 +518,165 @@ class IntrinsicValueEstimation:
 
     def _helper_method(self):
         pass
+
+    def _run_dcf(
+        self,
+        fcf: float,
+        growth_rate: float,
+        discount_rate: float,
+        terminal_growth_rate: float,
+        shares_outstanding: int,
+        net_debt: float,
+        years: int,
+    ) -> dict:
+        projected_fcfs = []
+        current_fcf = fcf
+
+        for _ in range(1, years + 1):
+            current_fcf *= (1 + growth_rate)
+            projected_fcfs.append(current_fcf)
+
+        discounted_fcfs = [cf / ((1 + discount_rate) ** idx) for idx, cf in enumerate(projected_fcfs, start=1)]
+        pv_of_fcf = sum(discounted_fcfs)
+
+        final_year_fcf = projected_fcfs[-1]
+        terminal_value = (final_year_fcf * (1 + terminal_growth_rate)) / (discount_rate - terminal_growth_rate)
+        pv_of_tv = terminal_value / ((1 + discount_rate) ** years)
+
+        enterprise_value = pv_of_fcf + pv_of_tv
+        equity_value = enterprise_value - net_debt
+        value_per_share = equity_value / shares_outstanding if shares_outstanding > 0 else 0
+
+        return {
+            "pv_of_fcf": pv_of_fcf,
+            "pv_of_terminal_value": pv_of_tv,
+            "enterprise_value": enterprise_value,
+            "equity_value": equity_value,
+            "intrinsic_value_per_share": value_per_share,
+        }
+
+    def _build_valuation_scenarios(
+        self,
+        fcf: float,
+        growth_rate: float,
+        discount_rate: float,
+        terminal_growth_rate: float,
+        shares_outstanding: int,
+        net_debt: float,
+        years: int,
+    ) -> dict:
+        base_growth = growth_rate
+        bear_growth = min(base_growth * 0.5, base_growth - 0.02) if base_growth > 0.02 else base_growth - 0.01
+        bull_growth = max(base_growth * 1.2, base_growth + 0.02)
+
+        base_discount = discount_rate
+        bear_discount = base_discount + 0.02
+        bull_discount = max(0.06, base_discount - 0.015)
+
+        base_terminal = terminal_growth_rate
+        bear_terminal = max(0.005, base_terminal - 0.01)
+        bull_terminal = min(base_discount - 0.01, base_terminal + 0.005)
+
+        scenario_inputs = {
+            "bear": {
+                "growth_rate": bear_growth,
+                "discount_rate": bear_discount,
+                "terminal_growth_rate": min(bear_terminal, bear_discount - 0.01),
+            },
+            "base": {
+                "growth_rate": base_growth,
+                "discount_rate": base_discount,
+                "terminal_growth_rate": min(base_terminal, base_discount - 0.01),
+            },
+            "bull": {
+                "growth_rate": bull_growth,
+                "discount_rate": bull_discount,
+                "terminal_growth_rate": min(bull_terminal, bull_discount - 0.01),
+            },
+        }
+
+        scenarios = {}
+        for name, inputs in scenario_inputs.items():
+            scenario_result = self._run_dcf(
+                fcf=fcf,
+                growth_rate=inputs["growth_rate"],
+                discount_rate=inputs["discount_rate"],
+                terminal_growth_rate=inputs["terminal_growth_rate"],
+                shares_outstanding=shares_outstanding,
+                net_debt=net_debt,
+                years=years,
+            )
+            scenarios[name] = {
+                **inputs,
+                **scenario_result,
+            }
+        return scenarios
+
+    def _build_valuation_range_summary(self, scenarios: dict) -> dict:
+        bear = float(scenarios["bear"]["intrinsic_value_per_share"])
+        base = float(scenarios["base"]["intrinsic_value_per_share"])
+        bull = float(scenarios["bull"]["intrinsic_value_per_share"])
+        spread = bull - bear
+        midpoint = (bull + bear) / 2 if bull or bear else 0.0
+        spread_ratio = (spread / midpoint) if midpoint > 0 else None
+        return {
+            "bear_intrinsic_value_per_share": bear,
+            "base_intrinsic_value_per_share": base,
+            "bull_intrinsic_value_per_share": bull,
+            "valuation_spread": spread,
+            "valuation_spread_ratio": spread_ratio,
+        }
+
+    def _build_valuation_confidence_summary(
+        self,
+        market_price: Optional[float],
+        base_intrinsic_value: float,
+        valuation_range: dict,
+        growth_rate: float,
+        discount_rate: float,
+    ) -> dict:
+        spread_ratio = valuation_range.get("valuation_spread_ratio")
+        range_label = "high"
+        if spread_ratio is None:
+            range_label = "low"
+        elif spread_ratio > 1.0:
+            range_label = "low"
+        elif spread_ratio > 0.6:
+            range_label = "medium"
+
+        market_support = "unknown"
+        if market_price and base_intrinsic_value > 0:
+            gap = abs(base_intrinsic_value - market_price) / base_intrinsic_value
+            if gap < 0.2:
+                market_support = "strong"
+            elif gap < 0.5:
+                market_support = "moderate"
+            else:
+                market_support = "weak"
+
+        confidence_score = 85.0
+        if spread_ratio is not None:
+            confidence_score -= min(spread_ratio * 25.0, 35.0)
+        confidence_score -= min(abs(growth_rate) * 40.0, 15.0)
+        confidence_score -= min(max(discount_rate - 0.09, 0.0) * 100.0, 10.0)
+        if market_support == "weak":
+            confidence_score -= 8.0
+        elif market_support == "moderate":
+            confidence_score -= 3.0
+
+        confidence_score = max(15.0, min(95.0, confidence_score))
+        confidence_label = "high"
+        if confidence_score < 55.0:
+            confidence_label = "low"
+        elif confidence_score < 75.0:
+            confidence_label = "medium"
+
+        return {
+            "confidence_score": confidence_score,
+            "confidence_label": confidence_label,
+            "range_reliability": range_label,
+            "market_support": market_support,
+        }
 
 class MarginOfSafety:
     """
@@ -539,12 +704,22 @@ class MarginOfSafety:
         if market_price <= 0:
             raise ValueError("market_price must be positive")
 
-        # Express upside/downside relative to the price paid so overvaluation does not explode past -100%.
-        margin = (intrinsic_value - market_price) / market_price
+        # Standard Graham/Buffett margin of safety: the discount to intrinsic
+        # value, expressed as a fraction OF intrinsic value. This is the
+        # convention the DEEP_DISCOUNT_MARGIN_MIN / DISCOUNT_MARGIN_MIN /
+        # UNDERVALUED_MARGIN_MIN thresholds (evaluator_thresholds.py) and the
+        # rest of this tool's "margin of safety" language assume.
+        margin = (intrinsic_value - market_price) / intrinsic_value
+        # Also expose the price-relative view (bounded at -100% as price rises,
+        # rather than unbounded like the standard formula above) as a distinct,
+        # honestly-named field for display -- without overloading
+        # "margin_of_safety" with a different definition.
+        price_upside_if_fair_value = (intrinsic_value - market_price) / market_price
         return {
             "intrinsic_value": intrinsic_value,
             "market_price": market_price,
             "margin_of_safety": margin,
+            "price_upside_if_fair_value": price_upside_if_fair_value,
             "is_discount": market_price < intrinsic_value
         }
 
@@ -738,3 +913,72 @@ class DividendsRetainedEarningsAndTaxEfficiency:
         """
         pass
 
+
+class SpecialInvestmentInstruments:
+    """
+    Heuristic: Special Investment Instruments
+    """
+    def __init__(self):
+        pass
+
+    def evaluate(
+        self,
+        coupon_rate: Optional[float] = None,
+        conversion_discount: Optional[float] = None,
+        collateral_coverage: Optional[float] = None,
+        ticker: str = "",
+    ) -> dict:
+        if ticker and (coupon_rate is None or conversion_discount is None or collateral_coverage is None):
+            commentary = fetch_special_instrument_commentary(ticker)
+            if not commentary:
+                return {
+                    "ticker": ticker,
+                    "applicable": False,
+                    "reason": "No special investment instrument evidence found in SEC filings.",
+                }
+
+            parsed = _parse_special_instrument_metrics(commentary)
+            if coupon_rate is None:
+                coupon_rate = parsed["coupon_rate"]
+            if conversion_discount is None:
+                conversion_discount = parsed["conversion_discount"]
+            if collateral_coverage is None:
+                collateral_coverage = parsed["collateral_coverage"]
+
+        if coupon_rate is None and conversion_discount is None and collateral_coverage is None:
+            return {
+                "ticker": ticker,
+                "applicable": False,
+                "reason": "No special investment instrument evidence found in SEC filings.",
+            }
+
+        score = 0
+        if coupon_rate is not None and coupon_rate >= SPECIAL_INSTRUMENT_COUPON_RATE_MIN:
+            score += 1
+        if conversion_discount is not None and conversion_discount >= SPECIAL_INSTRUMENT_CONVERSION_DISCOUNT_MIN:
+            score += 1
+        if collateral_coverage is not None and collateral_coverage >= SPECIAL_INSTRUMENT_COLLATERAL_COVERAGE_MIN:
+            score += 1
+
+        attractiveness = "low"
+        if score == 3:
+            attractiveness = "high"
+        elif score == 2:
+            attractiveness = "moderate"
+
+        result = {
+            "coupon_rate": coupon_rate,
+            "conversion_discount": conversion_discount,
+            "collateral_coverage": collateral_coverage,
+            "instrument_score": score,
+            "instrument_attractiveness": attractiveness,
+        }
+        if ticker:
+            result["ticker"] = ticker
+        return result
+
+    def _helper_method(self):
+        """
+        Example helper method. All internal logic should be _ prefixed.
+        """
+        pass

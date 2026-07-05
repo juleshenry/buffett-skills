@@ -28,7 +28,9 @@ from sec_data import extract_keyword_context
 from risk_behavior import ValueTraps
 from risk_behavior import DerivativesRisk
 from financial_metrics import CorePrincipleSeeThroughAccountingToEconomicReality, OwnerEarnings, normalize_capex_breakdown
-from industry_playbooks import ConsumerBrandsRetail, EnergyUtilities, IndustriesToAvoidCounterexamples, InsuranceFloat, MediaPublishing, Railways, TechnologyInternet, UnderwritingDiscipline
+# industry_playbooks was deliberately removed from the universal ticker pipeline
+# (industry-specific evaluators require inputs no single pipeline run can supply
+# for every ticker) -- see plan.md. Its tests were removed along with it below.
 import investment_philosophy
 import management_governance
 import thinking_frameworks
@@ -328,15 +330,21 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
         self.assertEqual(result["business_model_type"], "recurring_revenue")
 
+    @patch("sec_data.fetch_filing_section")
     @patch("business_moat.fetch_deep_financials")
     @patch("business_moat.fetch_historical_margins")
-    def test_business_model_type_returns_not_applicable_without_explicit_recurring_revenue_ratio(self, mock_margins, mock_financials):
+    def test_business_model_type_classifies_from_margins_when_recurring_revenue_ratio_is_unavailable(self, mock_margins, mock_financials, mock_filing_section):
         mock_margins.return_value = pd.DataFrame([{"Year": 2024, "Gross_Margin": 0.7}])
         mock_financials.return_value = {"total_revenue": 1000.0, "capex_total": -50.0}
+        # No business description available, so recurring_revenue_ratio can't be
+        # inferred -- BusinessModelTypes should still classify from gross margin
+        # and capital intensity alone rather than refusing to answer, since
+        # those two are always-available financial-statement figures.
+        mock_filing_section.return_value = ""
 
         result = BusinessModelTypes().evaluate(ticker="AAPL")
-        self.assertFalse(result["applicable"])
-        self.assertIn("recurring_revenue_ratio", result["reason"])
+        self.assertIsNone(result["recurring_revenue_ratio"])
+        self.assertEqual(result["business_model_type"], "asset_light")
 
     def test_durability_of_competitive_advantage(self):
         result = TheDurabilityOfCompetitiveAdvantage().evaluate(
@@ -357,38 +365,6 @@ class TestMinimalHeuristics(unittest.TestCase):
         result = TheDurabilityOfCompetitiveAdvantage().evaluate(ticker="AAPL")
         self.assertEqual(result["durability_assessment"], "strong")
         mock_fetch_metrics.assert_called_once_with("AAPL")
-
-    def test_underwriting_discipline(self):
-        result = UnderwritingDiscipline().evaluate(combined_ratio=97.0)
-        self.assertEqual(result["underwriting_discipline"], "disciplined")
-        self.assertTrue(result["profitable_underwriting"])
-
-    @patch("industry_playbooks.fetch_insurance_metrics")
-    def test_underwriting_discipline_fetches_real_company_data(self, mock_fetch_metrics):
-        mock_fetch_metrics.return_value = {"combined_ratio": 94.0}
-        result = UnderwritingDiscipline().evaluate(ticker="CB")
-        self.assertEqual(result["underwriting_discipline"], "excellent")
-        mock_fetch_metrics.assert_called_once_with("CB")
-
-    def test_insurance_float(self):
-        result = InsuranceFloat().evaluate(
-            current_float=1200.0,
-            prior_float=1000.0,
-            combined_ratio=96.0,
-        )
-        self.assertEqual(result["float_growth"], 200.0)
-        self.assertEqual(result["float_quality"], "valuable")
-
-    @patch("industry_playbooks.fetch_insurance_metrics")
-    def test_insurance_float_fetches_real_company_data(self, mock_fetch_metrics):
-        mock_fetch_metrics.return_value = {
-            "current_float": 1200.0,
-            "prior_float": 1000.0,
-            "combined_ratio": 96.0,
-        }
-        result = InsuranceFloat().evaluate(ticker="CB")
-        self.assertEqual(result["float_quality"], "valuable")
-        mock_fetch_metrics.assert_called_once_with("CB")
 
     def test_focus_investing(self):
         result = FocusInvestingPrinciple().evaluate([40.0, 25.0, 15.0, 10.0, 10.0])
@@ -580,6 +556,49 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertAlmostEqual(result["free_cash_flow"], 110.0)
         mock_fetch_financials.assert_called_once_with("AAPL")
 
+    @patch.object(OwnerEarnings, "_query_ollama_capex_breakdown")
+    @patch.object(OwnerEarnings, "_fetch_mda_section")
+    @patch.object(OwnerEarnings, "_fetch_deep_financials")
+    def test_owner_earnings_uses_reported_depreciation_when_available(self, mock_financials, mock_mda, mock_capex_breakdown):
+        # Mirrors a real AAPL-shaped period where operating cash flow dips
+        # slightly below net income (working-capital timing), which used to
+        # make the OCF-NI proxy go negative even though real reported D&A is
+        # a large positive number.
+        mock_financials.return_value = {
+            "net_income": 112.0,
+            "operating_cash_flow": 111.5,
+            "capex_total": -12.7,
+            "depreciation_and_amortization": 11.7,
+        }
+        mock_mda.return_value = ""
+        mock_capex_breakdown.return_value = {"maintenance_percentage": 0.35}
+
+        result = OwnerEarnings().evaluate("AAPL")
+
+        self.assertEqual(result["depreciation_amortization_estimate"], 11.7)
+        self.assertEqual(result["depreciation_amortization_source"], "reported")
+        self.assertAlmostEqual(result["owner_earnings"], 112.0 + 11.7 - (12.7 * 0.35))
+
+    @patch.object(OwnerEarnings, "_query_ollama_capex_breakdown")
+    @patch.object(OwnerEarnings, "_fetch_mda_section")
+    @patch.object(OwnerEarnings, "_fetch_deep_financials")
+    def test_owner_earnings_floors_ocf_minus_ni_proxy_at_zero(self, mock_financials, mock_mda, mock_capex_breakdown):
+        # No reported D&A available, and OCF fell below NI for the period --
+        # the fallback proxy must not go negative (D&A cannot be negative).
+        mock_financials.return_value = {
+            "net_income": 112.0,
+            "operating_cash_flow": 111.5,
+            "capex_total": -12.7,
+            "depreciation_and_amortization": None,
+        }
+        mock_mda.return_value = ""
+        mock_capex_breakdown.return_value = {"maintenance_percentage": 0.35}
+
+        result = OwnerEarnings().evaluate("AAPL")
+
+        self.assertEqual(result["depreciation_amortization_estimate"], 0)
+        self.assertEqual(result["depreciation_amortization_source"], "ocf_minus_ni_proxy")
+
     def test_dividends_tax_efficiency(self):
         result = DividendsRetainedEarningsAndTaxEfficiency().evaluate(
             dividend_payout_ratio=0.30,
@@ -623,7 +642,7 @@ class TestMinimalHeuristics(unittest.TestCase):
         result = DerivativesRisk().evaluate(ticker="AAPL")
 
         self.assertFalse(result["applicable"])
-        self.assertIn("Could not derive derivative exposure summary", result["reason"])
+        self.assertIn("No material derivative exposure found", result["reason"])
 
     @patch("business_moat.fetch_cpi_inflation_data")
     @patch("business_moat.fetch_historical_margins")
@@ -657,41 +676,50 @@ class TestMinimalHeuristics(unittest.TestCase):
 
     def test_corporate_culture(self):
         result = CorporateCulture().evaluate(
-            employee_turnover=0.10,
-            insider_ownership=0.06,
-            restructurings_per_5y=1,
+            employee_turnover=0.05,
+            insider_ownership=0.12,
+            restructurings_per_5y=0,
         )
-        self.assertEqual(result["culture_score"], 3)
+        self.assertAlmostEqual(result["culture_score"], 2.83, places=2)
         self.assertEqual(result["culture_assessment"], "strong")
 
+    @patch("management_governance._semantic_polarity_score")
     @patch("management_governance.yf.Ticker")
     @patch("management_governance.fetch_filing_keyword_context")
     @patch("management_governance.fetch_filing_section")
-    def test_corporate_culture_fetches_real_inputs_for_ticker(self, mock_fetch_section, mock_fetch_context, mock_ticker):
+    def test_corporate_culture_fetches_real_inputs_for_ticker(self, mock_fetch_section, mock_fetch_context, mock_ticker, mock_semantic_score):
         mock_ticker.return_value.info = {"heldPercentInsiders": 0.06}
         mock_fetch_section.return_value = "10% employee turnover was reported. Retention remained strong."
         mock_fetch_context.return_value = "The company announced a restructuring and a reorganization program."
+        # Regex directly extracts the turnover rate above, so this mocked semantic
+        # score is only consumed for the restructuring-severity read: 0.2 means
+        # "fairly close to the negative (significant restructuring) anchor".
+        mock_semantic_score.return_value = 0.2
 
         result = CorporateCulture().evaluate(ticker="AAPL")
 
         self.assertEqual(result["insider_ownership"], 0.06)
         self.assertEqual(result["employee_turnover"], 0.10)
-        self.assertEqual(result["restructurings_per_5y"], 2)
+        self.assertAlmostEqual(result["restructurings_per_5y"], 2.4, places=4)
         self.assertEqual(result["signals_available"], 3)
         self.assertEqual(result["culture_assessment"], "stable")
 
+    @patch("management_governance._semantic_polarity_score")
     @patch("management_governance.yf.Ticker")
     @patch("management_governance.fetch_filing_keyword_context")
     @patch("management_governance.fetch_filing_section")
-    def test_corporate_culture_returns_not_applicable_without_enough_signals(self, mock_fetch_section, mock_fetch_context, mock_ticker):
-        mock_ticker.return_value.info = {"heldPercentInsiders": 0.06}
+    def test_corporate_culture_returns_not_applicable_without_enough_signals(self, mock_fetch_section, mock_fetch_context, mock_ticker, mock_semantic_score):
+        mock_ticker.return_value.info = {}
         mock_fetch_section.return_value = "The company discussed employees and retention qualitatively."
         mock_fetch_context.return_value = ""
+        # Simulates the embedding pipeline being unavailable/inconclusive, so
+        # there's genuinely zero usable signal (not even a semantic estimate).
+        mock_semantic_score.return_value = None
 
         result = CorporateCulture().evaluate(ticker="AAPL")
 
         self.assertFalse(result["applicable"])
-        self.assertIn("need at least two", result["reason"])
+        self.assertIn("at least one culture proxy", result["reason"])
 
     def test_acquisition_logic(self):
         result = AcquisitionLogicAcquisitionCriteria().evaluate(
@@ -748,7 +776,7 @@ class TestMinimalHeuristics(unittest.TestCase):
         result = AcquisitionLogicAcquisitionCriteria().evaluate(ticker="AAPL")
 
         self.assertFalse(result["applicable"])
-        self.assertIn("All metrics must be provided or fetchable", result["reason"])
+        self.assertIn("No recent acquisition evidence found", result["reason"])
 
     def test_special_investment_instruments(self):
         result = SpecialInvestmentInstruments().evaluate(
@@ -798,107 +826,6 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
         self.assertEqual(result["patience_score"], 3)
         self.assertEqual(result["patience_as_edge"], "strong")
-
-    def test_consumer_brands_retail(self):
-        result = ConsumerBrandsRetail().evaluate(
-            gross_margin=0.40,
-            same_store_sales_growth=0.03,
-            brand_share_trend=0.01,
-        )
-        self.assertEqual(result["consumer_brand_quality"], "strong")
-
-    def test_media_publishing(self):
-        result = MediaPublishing().evaluate(
-            subscription_revenue_ratio=0.7,
-            ad_revenue_ratio=0.3,
-            churn_rate=0.08,
-        )
-        self.assertEqual(result["media_quality"], "strong")
-
-    @patch("industry_playbooks.fetch_media_metrics")
-    def test_media_publishing_fetches_real_company_data(self, mock_fetch_metrics):
-        mock_fetch_metrics.return_value = {
-            "subscription_revenue_ratio": 0.7,
-            "ad_revenue_ratio": 0.3,
-            "churn_rate": 0.08,
-        }
-        result = MediaPublishing().evaluate(ticker="NYT")
-        self.assertEqual(result["media_quality"], "strong")
-        mock_fetch_metrics.assert_called_once_with("NYT")
-
-    def test_energy_utilities(self):
-        result = EnergyUtilities().evaluate(
-            regulated_asset_ratio=0.8,
-            debt_to_ebitda=4.5,
-            allowed_return_on_equity=0.10,
-        )
-        self.assertEqual(result["utility_quality"], "strong")
-
-    def test_railways(self):
-        result = Railways().evaluate(
-            operating_ratio=0.62,
-            volume_growth=0.01,
-            maintenance_capex_ratio=0.5,
-        )
-        self.assertEqual(result["railway_quality"], "strong")
-
-    @patch("industry_playbooks.OwnerEarnings.evaluate")
-    @patch("industry_playbooks.fetch_deep_financials")
-    @patch("industry_playbooks.yf.Ticker")
-    def test_railways_fetches_real_inputs_for_ticker(self, mock_ticker, mock_financials, mock_owner_earnings):
-        mock_ticker.return_value.info = {"operatingMargins": 0.40, "revenueGrowth": 0.02}
-        mock_financials.return_value = {"total_revenue": 1000.0}
-        mock_owner_earnings.return_value = {"total_capex": 100.0, "maintenance_capex_estimate": 50.0}
-
-        result = Railways().evaluate(ticker="UNP")
-
-        self.assertEqual(result["railway_quality"], "strong")
-        self.assertAlmostEqual(result["maintenance_capex_ratio"], 0.5)
-
-    @patch("industry_playbooks.OwnerEarnings.evaluate")
-    @patch("industry_playbooks.fetch_deep_financials")
-    @patch("industry_playbooks.yf.Ticker")
-    def test_railways_does_not_divide_by_none_maintenance_capex(self, mock_ticker, mock_financials, mock_owner_earnings):
-        mock_ticker.return_value.info = {"operatingMargins": 0.40, "revenueGrowth": 0.02}
-        mock_financials.return_value = {"total_revenue": 1000.0}
-        mock_owner_earnings.return_value = {"total_capex": 100.0, "maintenance_capex_estimate": None}
-
-        result = Railways().evaluate(ticker="UNP")
-
-        self.assertAlmostEqual(result["maintenance_capex_ratio"], 1.0)
-        self.assertEqual(result["railway_quality"], "mixed")
-
-    def test_technology_internet(self):
-        result = TechnologyInternet().evaluate(
-            recurring_revenue_ratio=0.75,
-            net_revenue_retention=1.1,
-            stock_comp_ratio=0.10,
-        )
-        self.assertEqual(result["technology_quality"], "strong")
-
-    def test_industries_to_avoid(self):
-        result = IndustriesToAvoidCounterexamples().evaluate(
-            commodity_exposure=0.8,
-            leverage_ratio=4.5,
-            pricing_power=0.2,
-        )
-        self.assertEqual(result["red_flag_count"], 3)
-        self.assertTrue(result["avoid_industry"])
-
-    @patch("industry_playbooks.fetch_deep_financials")
-    @patch("industry_playbooks.fetch_company_info")
-    @patch("industry_playbooks.yf.Ticker")
-    def test_industries_to_avoid_fetches_real_inputs_for_ticker(self, mock_ticker, mock_company_info, mock_financials):
-        mock_ticker.return_value.info = {"ebitda": 100.0, "totalDebt": 600.0, "grossMargins": 0.2}
-        mock_company_info.return_value = {
-            "description": "The business is highly exposed to commodity spot prices and raw materials."
-        }
-        mock_financials.return_value = {"total_revenue": 1000.0, "net_income": 50.0}
-
-        result = IndustriesToAvoidCounterexamples().evaluate(ticker="X")
-
-        self.assertTrue(result["avoid_industry"])
-        self.assertGreaterEqual(result["red_flag_count"], 2)
 
     @patch("thinking_frameworks.fetch_filing_section")
     @patch("thinking_frameworks.yf.Ticker")

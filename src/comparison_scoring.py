@@ -20,14 +20,86 @@ CATEGORY_ALIASES = {
 
 
 CATEGORY_WEIGHTS = {
-    "financial_quality": 0.18,
-    "moat": 0.18,
+    "financial_quality": 0.22,
+    "moat": 0.22,
     "risk": 0.18,
     "valuation_capital": 0.18,
-    "management": 0.10,
-    "investment_performance": 0.08,
-    "thinking_frameworks": 0.05,
-    "industry": 0.05,
+    "management": 0.14,
+    "thinking_frameworks": 0.06,
+}
+
+
+BUSINESS_QUALITY_WEIGHTS = {
+    "financial_quality": 0.28,
+    "moat": 0.28,
+    "risk": 0.20,
+    "management": 0.18,
+    "thinking_frameworks": 0.06,
+}
+
+
+OPPORTUNITY_WEIGHTS = {
+    "valuation_capital": 0.50,
+    "risk": 0.15,
+    "moat": 0.12,
+    "financial_quality": 0.10,
+    "thinking_frameworks": 0.08,
+    "management": 0.05,
+}
+
+
+COMPOSITE_SCORE_WEIGHTS = {
+    "business_quality_score": 0.55,
+    "opportunity_score": 0.45,
+}
+
+
+MIN_PEER_GROUP_SIZE = 5
+
+
+PEER_SENSITIVE_METRICS = {
+    "profit_margin",
+    "cash_conversion",
+    "free_cash_flow",
+    "owner_earnings",
+    "net_income",
+    "operating_cash_flow",
+    "depreciation_amortization_estimate",
+    "maintenance_capex_estimate",
+    "total_capex",
+    "gross_margin",
+    "gross_margin_trend",
+    "market_share_trend",
+    "return_on_capital",
+    "return_on_tangible_assets",
+    "recurring_revenue_ratio",
+    "capital_intensity",
+    "margin_of_safety",
+    "fcf_to_debt",
+    "dividend_payout_ratio",
+    "retained_earnings_ratio",
+    "stock_cagr",
+    "benchmark_cagr",
+    "tracking_error",
+    "annualized_volatility",
+    "debt_to_equity",
+    "combined_ratio",
+    "subscription_revenue_ratio",
+    "ad_revenue_ratio",
+    "churn_rate",
+    "regulated_asset_ratio",
+    "allowed_roe",
+    "operating_ratio",
+    "maintenance_capex_ratio",
+    "net_revenue_retention",
+    "stock_comp_ratio",
+    "commodity_exposure",
+    "leverage_ratio",
+    "pricing_power_score",
+    "purchase_multiple",
+    "employee_turnover",
+    "insider_ownership",
+    "restructurings_per_5y",
 }
 
 
@@ -41,6 +113,7 @@ SCORE_MAX_BY_KEY = {
     "utility_score": 3.0,
     "railway_score": 3.0,
     "technology_score": 3.0,
+    "confidence_score": 100.0,
 }
 
 
@@ -137,6 +210,12 @@ LABEL_SCORE_MAP = {
     "network effects": 90.0,
     "regulatory": 70.0,
     "unknown": 50.0,
+    "high": 85.0,
+    "medium": 60.0,
+    "low": 30.0,
+    "strong": 85.0,
+    "moderate": 60.0,
+    "weak": 30.0,
 }
 
 
@@ -409,6 +488,8 @@ def score_management_text(text: str) -> dict:
 
 
 def _record_metric(company: dict, category: str, source_path: str, key: str, value, direct_score=None, direction=None):
+    evidence_type, evidence_weight = _evidence_profile(source_path)
+    metric_basis = "peer_sensitive" if key in PEER_SENSITIVE_METRICS or direction is not None else "intrinsic"
     metric = {
         "ticker": company.get("ticker"),
         "company_name": company.get("company_name") or company.get("ticker"),
@@ -418,12 +499,43 @@ def _record_metric(company: dict, category: str, source_path: str, key: str, val
         "source_path": source_path,
         "metric_name": key,
         "raw_value": value,
+        "evidence_type": evidence_type,
+        "evidence_weight": evidence_weight,
+        "metric_basis": metric_basis,
     }
     if direct_score is not None:
         metric["normalized_score"] = _round(direct_score)
     if direction:
         metric["direction"] = direction
     return metric
+
+
+def _evidence_profile(source_path: str) -> tuple[str, float]:
+    llm_text_prefixes = (
+        "thinking_frameworks.Inversion",
+        "management_governance.ManagementEvaluation",
+    )
+    llm_panel_prefixes = (
+        "thinking_frameworks.CircleOfCompetence",
+        "business_moat.EconomicMoat",
+        "valuation_capital.ShareBuybackAnalysis",
+        "valuation_capital.CapitalAllocationAnalysis.buyback_analysis",
+        "risk_behavior.LeverageRisk",
+    )
+
+    if source_path.startswith(llm_text_prefixes):
+        return "llm_text", 0.45
+    if source_path.startswith(llm_panel_prefixes):
+        return "llm_panel", 0.65
+    return "data_backed", 1.0
+
+
+def _should_skip_metric_path(source_path: str, key: str) -> bool:
+    path = f"{source_path}.{key}" if source_path else key
+    scenario_markers = ("valuation_scenarios.bear", "valuation_scenarios.base", "valuation_scenarios.bull")
+    if any(marker in path for marker in scenario_markers):
+        return True
+    return False
 
 
 def _extract_metrics_from_mapping(company: dict, category: str, source_path: str, value) -> list[dict]:
@@ -433,6 +545,8 @@ def _extract_metrics_from_mapping(company: dict, category: str, source_path: str
             return metrics
         for key, item in value.items():
             if key in {"panel_judgments", "panel_models", "panel_vote_split"}:
+                continue
+            if _should_skip_metric_path(source_path, key):
                 continue
             child_path = f"{source_path}.{key}" if source_path else key
             if isinstance(item, dict):
@@ -561,11 +675,13 @@ def _apply_peer_normalization(metrics: list[dict]) -> None:
             continue
 
         items = None
+        selected_bucket = None
         for bucket in _candidate_normalization_buckets(metric):
             bucket_items = grouped.get(bucket, [])
             unique_tickers = {item.get("ticker") for item in bucket_items}
             if len(unique_tickers) >= 2:
                 items = bucket_items
+                selected_bucket = bucket
                 break
 
         if not items:
@@ -585,18 +701,167 @@ def _apply_peer_normalization(metrics: list[dict]) -> None:
                 ratio = 1.0 - ratio
             score = ratio * 100.0
         metric["normalized_score"] = _round(_clamp(score))
+        metric["peer_group_size"] = len({item.get("ticker") for item in items})
+        metric["normalization_scope"] = selected_bucket[1] if selected_bucket else "all"
 
 
-def _aggregate_company_scores(metrics: list[dict], qualitative: dict) -> dict:
-    category_buckets = {}
+def _category_reliability_factor(diagnostic: dict | None) -> float:
+    if not diagnostic:
+        return 0.0
+
+    evidence = float(diagnostic.get("average_evidence_weight") or 0.0)
+    peer_metrics = int(diagnostic.get("peer_metrics") or 0)
+    weak_peer_metrics = int(diagnostic.get("weak_peer_metrics") or 0)
+
+    if peer_metrics == 0:
+        peer_reliability = 1.0
+    else:
+        peer_reliability = max(0.35, 1.0 - (weak_peer_metrics / max(peer_metrics, 1)) * 0.45)
+
+    return _round((0.6 * evidence) + (0.4 * peer_reliability))
+
+
+def _compute_weighted_score(category_scores: dict, category_diagnostics: dict, weights: dict, score_name: str) -> dict:
+    total_weight = sum(weights.values())
+    weighted_total = 0.0
+    used_weight = 0.0
+    reliable_weight = 0.0
+
+    for category, weight in weights.items():
+        score = category_scores.get(category)
+        if score is None:
+            continue
+        weighted_total += float(score) * weight
+        used_weight += weight
+        reliable_weight += weight * _category_reliability_factor(category_diagnostics.get(category))
+
+    raw_score = None if used_weight == 0 else (weighted_total / used_weight)
+    structural_coverage = 0.0 if total_weight == 0 else (used_weight / total_weight)
+    reliability_adjusted_coverage = 0.0 if total_weight == 0 else (reliable_weight / total_weight)
+    coverage = min(structural_coverage, reliability_adjusted_coverage)
+    score = None if raw_score is None else _round(raw_score * coverage)
+
+    return {
+        f"raw_{score_name}": _round(raw_score) if raw_score is not None else None,
+        score_name: score,
+        f"{score_name}_coverage": _round(coverage * 100.0),
+        f"{score_name}_structural_coverage": _round(structural_coverage * 100.0),
+        f"{score_name}_reliability_coverage": _round(reliability_adjusted_coverage * 100.0),
+        f"{score_name}_categories": [category for category in weights if category in category_scores],
+    }
+
+
+def _compute_basis_weighted_score(metrics: list[dict], category_diagnostics: dict, weights: dict, score_name: str, preferred_basis: str, basis_mix: float) -> dict:
+    total_weight = sum(weights.values())
+    weighted_total = 0.0
+    used_weight = 0.0
+    reliable_weight = 0.0
+
+    for category, category_weight in weights.items():
+        category_metrics = [metric for metric in metrics if metric.get("category") == category and metric.get("normalized_score") is not None]
+        if not category_metrics:
+            continue
+
+        preferred_scores = [metric for metric in category_metrics if metric.get("metric_basis") == preferred_basis]
+        fallback_scores = [metric for metric in category_metrics if metric.get("metric_basis") != preferred_basis]
+
+        chosen = preferred_scores or fallback_scores
+        if not chosen:
+            continue
+
+        blended_scores = []
+        blended_weights = []
+        for metric in chosen:
+            score = float(metric["normalized_score"])
+            evidence_weight = float(metric.get("evidence_weight", 1.0))
+            basis_weight = basis_mix if metric.get("metric_basis") == preferred_basis else (1.0 - basis_mix)
+            blended_scores.append(score * evidence_weight * basis_weight)
+            blended_weights.append(evidence_weight * basis_weight)
+
+        total_metric_weight = sum(blended_weights)
+        if total_metric_weight <= 0:
+            continue
+
+        category_score = sum(blended_scores) / total_metric_weight
+        weighted_total += category_score * category_weight
+        used_weight += category_weight
+        reliable_weight += category_weight * _category_reliability_factor(category_diagnostics.get(category))
+
+    raw_score = None if used_weight == 0 else (weighted_total / used_weight)
+    structural_coverage = 0.0 if total_weight == 0 else (used_weight / total_weight)
+    reliability_adjusted_coverage = 0.0 if total_weight == 0 else (reliable_weight / total_weight)
+    coverage = min(structural_coverage, reliability_adjusted_coverage)
+    score = None if raw_score is None else _round(raw_score * coverage)
+
+    return {
+        f"raw_{score_name}": _round(raw_score) if raw_score is not None else None,
+        score_name: score,
+        f"{score_name}_coverage": _round(coverage * 100.0),
+        f"{score_name}_structural_coverage": _round(structural_coverage * 100.0),
+        f"{score_name}_reliability_coverage": _round(reliability_adjusted_coverage * 100.0),
+        f"{score_name}_basis": preferred_basis,
+    }
+
+
+def _build_category_diagnostics(metrics: list[dict]) -> dict:
+    diagnostics = {}
+    by_category = {}
     for metric in metrics:
         score = metric.get("normalized_score")
         category = metric.get("category")
         if score is None or not category:
             continue
-        category_buckets.setdefault(category, []).append(float(score))
+        by_category.setdefault(category, []).append(metric)
 
-    category_scores = {category: _round(sum(scores) / len(scores)) for category, scores in category_buckets.items() if scores}
+    for category, items in by_category.items():
+        evidence_weights = [float(item.get("evidence_weight", 1.0)) for item in items]
+        data_backed_count = sum(1 for item in items if item.get("evidence_type") == "data_backed")
+        llm_only_count = len(items) - data_backed_count
+        peer_group_sizes = [int(item.get("peer_group_size")) for item in items if item.get("peer_group_size") is not None]
+        weak_peer_metrics = sum(1 for size in peer_group_sizes if size < MIN_PEER_GROUP_SIZE)
+
+        warning_parts = []
+        if peer_group_sizes and weak_peer_metrics:
+            warning_parts.append(
+                f"{weak_peer_metrics}/{len(peer_group_sizes)} peer metrics compared against fewer than {MIN_PEER_GROUP_SIZE} tickers"
+            )
+        if data_backed_count == 0 and llm_only_count:
+            warning_parts.append("category score relies entirely on LLM-derived signals")
+
+        diagnostics[category] = {
+            "scored_metrics": len(items),
+            "average_evidence_weight": _round(sum(evidence_weights) / len(evidence_weights)),
+            "data_backed_metrics": data_backed_count,
+            "llm_only_metrics": llm_only_count,
+            "peer_metrics": len(peer_group_sizes),
+            "weak_peer_metrics": weak_peer_metrics,
+            "min_peer_group_size": min(peer_group_sizes) if peer_group_sizes else None,
+            "warning": "; ".join(warning_parts) if warning_parts else None,
+        }
+
+    return diagnostics
+
+
+def _aggregate_company_scores(metrics: list[dict], qualitative: dict) -> dict:
+    category_buckets = {}
+    category_weight_buckets = {}
+    for metric in metrics:
+        score = metric.get("normalized_score")
+        category = metric.get("category")
+        if score is None or not category:
+            continue
+        weight = float(metric.get("evidence_weight", 1.0))
+        category_buckets.setdefault(category, []).append(float(score) * weight)
+        category_weight_buckets.setdefault(category, []).append(weight)
+
+    category_scores = {}
+    for category, weighted_scores in category_buckets.items():
+        total_weight = sum(category_weight_buckets.get(category, []))
+        if total_weight <= 0:
+            continue
+        category_scores[category] = _round(sum(weighted_scores) / total_weight)
+
+    category_diagnostics = _build_category_diagnostics(metrics)
 
     weighted_total = 0.0
     used_weight = 0.0
@@ -609,7 +874,7 @@ def _aggregate_company_scores(metrics: list[dict], qualitative: dict) -> dict:
 
     raw_overall_score = None if used_weight == 0 else (weighted_total / used_weight)
 
-    weighted_category_coverage = used_weight
+    weighted_category_coverage = used_weight / sum(CATEGORY_WEIGHTS.values())
     metric_coverage = min(len([metric for metric in metrics if metric.get("normalized_score") is not None]) / 18.0, 1.0)
     coverage_penalty_factor = (0.65 * weighted_category_coverage) + (0.35 * metric_coverage)
     overall_score = None if raw_overall_score is None else _round(raw_overall_score * coverage_penalty_factor)
@@ -628,9 +893,12 @@ def _aggregate_company_scores(metrics: list[dict], qualitative: dict) -> dict:
 
     return {
         "category_scores": category_scores,
+        "category_diagnostics": category_diagnostics,
         "overall_score": overall_score,
         "raw_overall_score": _round(raw_overall_score) if raw_overall_score is not None else None,
         "coverage_penalty_factor": _round(coverage_penalty_factor),
+        **_compute_basis_weighted_score(metrics, category_diagnostics, BUSINESS_QUALITY_WEIGHTS, "business_quality_score", preferred_basis="intrinsic", basis_mix=0.8),
+        **_compute_basis_weighted_score(metrics, category_diagnostics, OPPORTUNITY_WEIGHTS, "opportunity_score", preferred_basis="peer_sensitive", basis_mix=0.8),
         "confidence_score": confidence_score,
         "coverage": {
             "scored_metrics": scored_metrics,
@@ -638,6 +906,61 @@ def _aggregate_company_scores(metrics: list[dict], qualitative: dict) -> dict:
             "weighted_category_coverage": _round(weighted_category_coverage * 100.0),
             "metric_coverage": _round(metric_coverage * 100.0),
         },
+    }
+
+
+def _build_rankings(company_packets: list[dict], score_key: str, raw_score_key: str | None = None, coverage_key: str | None = None) -> list[dict]:
+    rankings = []
+    for packet in company_packets:
+        row = {
+            "ticker": packet["ticker"],
+            "company_name": packet["company_name"],
+            score_key: packet.get(score_key),
+        }
+        if raw_score_key:
+            row[raw_score_key] = packet.get(raw_score_key)
+        if coverage_key:
+            row[coverage_key] = packet.get(coverage_key)
+        rankings.append(row)
+
+    rankings.sort(key=lambda item: (item.get(score_key) is None, -(item.get(score_key) or 0.0), item["ticker"]))
+    for index, ranking in enumerate(rankings, start=1):
+        ranking["rank"] = index
+    return rankings
+
+
+def _compute_composite_score(packet: dict) -> dict:
+    business_quality_score = packet.get("business_quality_score")
+    opportunity_score = packet.get("opportunity_score")
+    business_quality_coverage = float(packet.get("business_quality_score_coverage") or 0.0) / 100.0
+    opportunity_coverage = float(packet.get("opportunity_score_coverage") or 0.0) / 100.0
+
+    weighted_total = 0.0
+    used_weight = 0.0
+    coverage_weighted_total = 0.0
+
+    for score_key, base_weight in COMPOSITE_SCORE_WEIGHTS.items():
+        score = packet.get(score_key)
+        if score is None:
+            continue
+        weighted_total += float(score) * base_weight
+        used_weight += base_weight
+
+    if business_quality_score is not None:
+        coverage_weighted_total += COMPOSITE_SCORE_WEIGHTS["business_quality_score"] * business_quality_coverage
+    if opportunity_score is not None:
+        coverage_weighted_total += COMPOSITE_SCORE_WEIGHTS["opportunity_score"] * opportunity_coverage
+
+    raw_composite_score = None if used_weight == 0 else (weighted_total / used_weight)
+    composite_coverage = 0.0 if used_weight == 0 else (coverage_weighted_total / used_weight)
+    composite_score = None if raw_composite_score is None else _round(raw_composite_score * composite_coverage)
+
+    return {
+        "legacy_overall_score": packet.get("overall_score"),
+        "legacy_raw_overall_score": packet.get("raw_overall_score"),
+        "composite_score": composite_score,
+        "raw_composite_score": _round(raw_composite_score) if raw_composite_score is not None else None,
+        "composite_score_coverage": _round(composite_coverage * 100.0),
     }
 
 
@@ -659,26 +982,35 @@ def build_comparison(companies: list[dict]) -> dict:
 
     _apply_peer_normalization(all_metrics)
 
-    packets_by_ticker = {packet["ticker"]: packet for packet in company_packets}
     for packet in company_packets:
         metrics = [metric for metric in all_metrics if metric.get("ticker") == packet["ticker"]]
         packet["metric_scores"] = metrics
         packet.update(_aggregate_company_scores(metrics, packet.get("qualitative_scores") or {}))
+        packet.update(_compute_composite_score(packet))
 
-    rankings = []
-    for packet in company_packets:
-        rankings.append(
-            {
-                "ticker": packet["ticker"],
-                "company_name": packet["company_name"],
-                "overall_score": packet.get("overall_score"),
-                "confidence_score": packet.get("confidence_score"),
-            }
-        )
-    rankings.sort(key=lambda item: (item.get("overall_score") is None, -(item.get("overall_score") or 0.0), item["ticker"]))
+    rankings = _build_rankings(company_packets, "composite_score", raw_score_key="raw_composite_score", coverage_key="composite_score_coverage")
+    for ranking in rankings:
+        ticker = ranking["ticker"]
+        packet = next(packet for packet in company_packets if packet["ticker"] == ticker)
+        ranking["overall_score"] = ranking.pop("composite_score")
+        ranking["raw_overall_score"] = ranking.pop("raw_composite_score")
+        ranking["overall_score_coverage"] = ranking.pop("composite_score_coverage")
+        ranking["confidence_score"] = packet.get("confidence_score")
+        ranking["legacy_overall_score"] = packet.get("legacy_overall_score")
+        ranking["legacy_raw_overall_score"] = packet.get("legacy_raw_overall_score")
 
-    for index, ranking in enumerate(rankings, start=1):
-        ranking["rank"] = index
+    business_quality_rankings = _build_rankings(
+        company_packets,
+        "business_quality_score",
+        raw_score_key="raw_business_quality_score",
+        coverage_key="business_quality_score_coverage",
+    )
+    opportunity_rankings = _build_rankings(
+        company_packets,
+        "opportunity_score",
+        raw_score_key="raw_opportunity_score",
+        coverage_key="opportunity_score_coverage",
+    )
 
     category_rankings = {}
     for category in CATEGORY_WEIGHTS:
@@ -691,6 +1023,7 @@ def build_comparison(companies: list[dict]) -> dict:
                 "ticker": packet["ticker"],
                 "company_name": packet["company_name"],
                 "score": score,
+                "warning": ((packet.get("category_diagnostics") or {}).get(category) or {}).get("warning"),
             })
         rows.sort(key=lambda item: (-item["score"], item["ticker"]))
         for index, row in enumerate(rows, start=1):
@@ -698,11 +1031,28 @@ def build_comparison(companies: list[dict]) -> dict:
         if rows:
             category_rankings[category] = rows
 
+    category_warnings = {}
+    for category, rows in category_rankings.items():
+        warnings = [
+            {
+                "ticker": row["ticker"],
+                "company_name": row["company_name"],
+                "warning": row["warning"],
+            }
+            for row in rows
+            if row.get("warning")
+        ]
+        if warnings:
+            category_warnings[category] = warnings
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "company_count": len(company_packets),
         "rankings": rankings,
+        "business_quality_rankings": business_quality_rankings,
+        "opportunity_rankings": opportunity_rankings,
         "category_rankings": category_rankings,
+        "category_warnings": category_warnings,
         "companies": company_packets,
     }
 

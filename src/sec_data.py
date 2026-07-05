@@ -1,6 +1,7 @@
 from cache_utils import disk_cache
 import html
 import re
+import time
 from typing import Dict, Iterable, Optional
 
 import requests
@@ -13,16 +14,80 @@ SUBMISSIONS_URL_TEMPLATE = "https://data.sec.gov/submissions/CIK{cik}.json"
 ARCHIVES_URL_TEMPLATE = "https://www.sec.gov/Archives/edgar/data/{cik_numeric}/{accession_no_dash}/{primary_doc}"
 INTERNAL_LINK_RE = re.compile(r"<a\b[^>]*href=[\"']#([^\"']+)[\"'][^>]*>(.*?)</a>", re.IGNORECASE | re.DOTALL)
 
+# SEC's fair-use policy caps automated access at 10 requests/second and will
+# throttle or block User-Agents that exceed it. A 500-ticker batch run, with
+# each ticker issuing 10+ SEC requests (10-K, 10-Q, 8-K, DEF 14A, plus
+# multiple keyword-context searches per form), has no trouble tripping that
+# limit if nothing paces the requests.
+_MIN_SECONDS_BETWEEN_REQUESTS = 0.15  # ~6-7 req/sec, safely under the 10/sec cap
+_last_request_time = 0.0
+
+# Retried instead of treated as fatal: 429/403 are SEC's rate-limit/throttle
+# signals, 5xx are transient server errors. Anything else (404, malformed
+# request, etc.) is a real error and should raise immediately.
+_RETRYABLE_STATUS_CODES = {403, 429, 500, 502, 503, 504}
+_MAX_ATTEMPTS = 4
+_INITIAL_BACKOFF_SECONDS = 1.0
+
 
 def get_sec_headers() -> Dict[str, str]:
     return {"User-Agent": DEFAULT_SEC_USER_AGENT}
 
 
+def _throttle() -> None:
+    """Enforces a minimum delay between outgoing SEC EDGAR requests."""
+    global _last_request_time
+    wait_time = _MIN_SECONDS_BETWEEN_REQUESTS - (time.monotonic() - _last_request_time)
+    if wait_time > 0:
+        time.sleep(wait_time)
+    _last_request_time = time.monotonic()
+
+
+def _sec_get(url: str, **kwargs) -> requests.Response:
+    """
+    Throttled, retrying wrapper around requests.get for every SEC EDGAR call
+    in this module. Retries transient failures (rate limiting, momentary
+    server errors) with exponential backoff instead of letting one flaky
+    request take down an entire batch run across hundreds of tickers.
+    """
+    kwargs.setdefault("headers", get_sec_headers())
+    kwargs.setdefault("timeout", 60)
+
+    last_exception: Optional[Exception] = None
+    for attempt in range(_MAX_ATTEMPTS):
+        _throttle()
+        try:
+            response = requests.get(url, **kwargs)
+        except requests.exceptions.RequestException as exc:
+            last_exception = exc
+        else:
+            if response.status_code not in _RETRYABLE_STATUS_CODES:
+                response.raise_for_status()
+                return response
+            last_exception = requests.exceptions.HTTPError(
+                f"Retryable status {response.status_code} from {url}"
+            )
+
+        if attempt < _MAX_ATTEMPTS - 1:
+            time.sleep(_INITIAL_BACKOFF_SECONDS * (2 ** attempt))
+
+    raise last_exception
+
+
 @disk_cache()
+def _fetch_ticker_map() -> dict:
+    """
+    Downloads SEC's full ticker->CIK directory exactly once (subject to the
+    disk cache TTL) instead of once per ticker. Before this, every one of the
+    500 S&P tickers re-downloaded the same several-MB JSON file just to look
+    itself up in it.
+    """
+    response = _sec_get(TICKER_MAP_URL)
+    return response.json()
+
+
 def get_cik_from_ticker(ticker: str) -> str:
-    response = requests.get(TICKER_MAP_URL, headers=get_sec_headers(), timeout=60)
-    response.raise_for_status()
-    data = response.json()
+    data = _fetch_ticker_map()
     ticker_upper = ticker.upper()
     for value in data.values():
         if value["ticker"].upper() == ticker_upper:
@@ -32,12 +97,7 @@ def get_cik_from_ticker(ticker: str) -> str:
 
 def get_latest_filing_metadata(ticker: str, form: str = "10-K") -> Dict[str, str]:
     cik = get_cik_from_ticker(ticker)
-    response = requests.get(
-        SUBMISSIONS_URL_TEMPLATE.format(cik=cik),
-        headers=get_sec_headers(),
-        timeout=60,
-    )
-    response.raise_for_status()
+    response = _sec_get(SUBMISSIONS_URL_TEMPLATE.format(cik=cik))
     recent = response.json().get("filings", {}).get("recent", {})
     forms = recent.get("form", [])
 
@@ -170,16 +230,14 @@ def _choose_end_index(text: str, start_index: int, end_markers: Optional[Iterabl
 @disk_cache()
 def fetch_latest_filing_text(ticker: str, form: str = "10-K") -> str:
     metadata = get_latest_filing_metadata(ticker, form=form)
-    response = requests.get(metadata["filing_url"], headers=get_sec_headers(), timeout=60)
-    response.raise_for_status()
+    response = _sec_get(metadata["filing_url"])
     return _strip_html(response.text)
 
 
 @disk_cache()
 def fetch_latest_filing_html(ticker: str, form: str = "10-K") -> str:
     metadata = get_latest_filing_metadata(ticker, form=form)
-    response = requests.get(metadata["filing_url"], headers=get_sec_headers(), timeout=60)
-    response.raise_for_status()
+    response = _sec_get(metadata["filing_url"])
     return response.text
 
 

@@ -269,9 +269,22 @@ class OwnerEarnings:
         
         net_income = financials.get("net_income") or 0
         operating_cash_flow = financials.get("operating_cash_flow") or 0
-        depreciation = operating_cash_flow - net_income if operating_cash_flow and net_income else 0
         total_capex = abs(financials.get("capex_total") or 0)
-        
+
+        depreciation = financials.get("depreciation_and_amortization")
+        depreciation_source = "reported"
+        if depreciation is None:
+            # Fallback only when the cash flow statement doesn't disclose D&A
+            # directly. OCF - NI conflates D&A with every other non-cash and
+            # working-capital adjustment and can go negative (e.g. when
+            # receivables/inventory swings outpace D&A for the period), which
+            # is economically meaningless -- D&A is never negative -- so the
+            # proxy is floored at 0 instead of silently understating owner
+            # earnings.
+            proxy = operating_cash_flow - net_income if operating_cash_flow and net_income else 0
+            depreciation = max(proxy, 0)
+            depreciation_source = "ocf_minus_ni_proxy"
+
         maintenance_pct_raw = capex_breakdown.get("maintenance_percentage")
         if maintenance_pct_raw is None:
             maintenance_pct = 1.0
@@ -287,12 +300,14 @@ class OwnerEarnings:
         return {
             "net_income": net_income,
             "depreciation_amortization_estimate": depreciation,
+            "depreciation_amortization_source": depreciation_source,
             "total_capex": total_capex,
             "maintenance_capex_estimate": maintenance_capex,
             "owner_earnings": owner_earnings
         }
 
     def _fetch_deep_financials(self, ticker: str) -> dict:
+        import pandas as pd
         import yfinance as yf
         stock = yf.Ticker(ticker)
         try:
@@ -302,11 +317,18 @@ class OwnerEarnings:
             recent_is = income_stmt.iloc[:, 0] if not income_stmt.empty else {}
             capex = recent_cf.get("Capital Expenditure", recent_cf.get("CapitalExpenditure"))
             ocf = recent_cf.get("Operating Cash Flow")
+            depreciation = recent_cf.get(
+                "Depreciation And Amortization",
+                recent_cf.get("Depreciation Amortization Depletion"),
+            )
+            if depreciation is not None and pd.isna(depreciation):
+                depreciation = None
             return {
                 "capex_total": capex,
                 "operating_cash_flow": ocf,
                 "net_income": recent_is.get("Net Income"),
-                "total_revenue": recent_is.get("Total Revenue")
+                "total_revenue": recent_is.get("Total Revenue"),
+                "depreciation_and_amortization": float(depreciation) if depreciation is not None else None,
             }
         except Exception:
             return {}

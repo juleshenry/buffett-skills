@@ -23,28 +23,47 @@ class TestEarningsCalls(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir)
             cache_dir.mkdir(parents=True, exist_ok=True)
-            cached_payload = [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}]
+            cached_payload = [{"id": i} for i in range(8)]
             (cache_dir / "AAPL.json").write_text(json.dumps(cached_payload), encoding="utf-8")
 
             with patch.object(earnings_calls, "CACHE_DIR", cache_dir):
                 with patch.object(earnings_calls, "_request_json") as mock_request:
                     result = earnings_calls.fetch_transcripts_for_ticker("AAPL")
-                    self.assertEqual(len(result), 4)
+                    self.assertEqual(len(result), 8)
                     mock_request.assert_not_called()
 
-    def test_fetch_last_four_for_sp500_counts_cached_and_fetched(self):
+    def test_fetch_recent_calls_for_sp500_counts_cached_and_fetched(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir) / "earnings_calls"
             cache_dir.mkdir(parents=True, exist_ok=True)
-            (cache_dir / "AAPL.json").write_text(json.dumps([{"id": i} for i in range(4)]), encoding="utf-8")
+            (cache_dir / "AAPL.json").write_text(json.dumps([{"id": i} for i in range(8)]), encoding="utf-8")
 
             with patch.object(earnings_calls, "CACHE_DIR", cache_dir):
                 with patch.object(earnings_calls, "load_sp500_tickers", return_value=["AAPL", "MSFT"]):
                     with patch.object(earnings_calls, "fetch_transcripts_for_ticker", return_value=[{"id": 1}]):
-                        summary = earnings_calls.fetch_last_four_for_sp500()
+                        summary = earnings_calls.fetch_recent_calls_for_sp500()
                         self.assertEqual(summary["tickers_total"], 2)
                         self.assertEqual(summary["tickers_cached"], 1)
                         self.assertEqual(summary["tickers_fetched"], 1)
+                        self.assertEqual(summary["tickers_failed"], 0)
+
+    def test_fetch_recent_calls_for_sp500_records_failures_without_aborting(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "earnings_calls"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+
+            def fake_fetch(ticker, limit=None, force_refresh=False):
+                if ticker == "BAD":
+                    raise RuntimeError("boom")
+                return [{"id": 1}]
+
+            with patch.object(earnings_calls, "CACHE_DIR", cache_dir):
+                with patch.object(earnings_calls, "load_sp500_tickers", return_value=["AAPL", "BAD"]):
+                    with patch.object(earnings_calls, "fetch_transcripts_for_ticker", side_effect=fake_fetch):
+                        summary = earnings_calls.fetch_recent_calls_for_sp500()
+                        self.assertEqual(summary["tickers_fetched"], 1)
+                        self.assertEqual(summary["tickers_failed"], 1)
+                        self.assertIn("BAD", summary["failures"])
 
     def test_load_cached_transcript_text_combines_calls_from_disk(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -5,7 +5,18 @@ __pycache__/
 *.pyc
 .venv/
 node_modules/
-output/
+
+# output/ is scratch, except earnings call transcripts: those cost API quota
+# to fetch (5,000 req/month cap) so they're committed for longevity.
+output/*
+!output/earnings_calls/
+!output/earnings_calls/**
+
+# .cache/ is disposable (SEC/yfinance/ollama caches, free to rebuild), except
+# the earnings-calls raw API cache, which is also quota-limited and committed.
+.cache/*
+!.cache/earnings_calls/
+!.cache/earnings_calls/**
 
 # Scratch and generated local artifacts
 test.js

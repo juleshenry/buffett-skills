@@ -11,7 +11,14 @@ from evaluator_config import EARNINGSCALLS_API_BASE_URL, EARNINGSCALLS_API_KEY
 ROOT_DIR = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT_DIR / "output" / "earnings_calls"
 SP500_TICKERS_PATH = ROOT_DIR / "sp500_tickers.json"
-DEFAULT_CALLS_PER_TICKER = 4
+DEFAULT_CALLS_PER_TICKER = 8  # ~2 years of quarterly calls
+
+# Raw API responses (call history + speaker segments) cached separately from
+# the generic `.cache/` dir and committed to git. The earningscalls.dev API
+# quota is capped at 5,000 requests/month, and every response here represents
+# an immutable historical transcript, so this cache never expires and must
+# never be dropped from version control (see .gitignore carve-out).
+RAW_RESPONSE_CACHE_DIR = ROOT_DIR / ".cache" / "earnings_calls"
 
 
 def _cache_path_for_ticker(ticker: str) -> Path:
@@ -79,7 +86,7 @@ def save_transcripts_to_cache(ticker: str, transcripts: list[dict[str, Any]]) ->
     save_cached_transcripts(ticker, transcripts)
 
 
-@disk_cache()
+@disk_cache(days=3650, cache_dir=RAW_RESPONSE_CACHE_DIR)
 def _request_json(url: str, params: dict[str, Any] | None = None) -> Any:
     if not EARNINGSCALLS_API_KEY:
         raise RuntimeError("EARNINGSCALLS_API_KEY is not set")
@@ -101,6 +108,17 @@ def _fetch_company_call_history(ticker: str) -> list[dict[str, Any]]:
     if not isinstance(call_history, list):
         return []
     return call_history
+
+
+def _is_earnings_call(call: dict[str, Any]) -> bool:
+    # The API mixes real quarterly earnings calls in with conference
+    # presentations, special events, etc. under the same history endpoint.
+    # Only "earnings" events count toward the requested N earnings calls.
+    event_type = str(call.get("event_type") or "").strip().lower()
+    if event_type:
+        return event_type == "earnings"
+    title = str(call.get("transcript_title") or call.get("title") or "").lower()
+    return "earnings" in title
 
 
 def _fetch_speaker_segments(call_id: Any) -> list[dict[str, Any]]:
@@ -131,7 +149,7 @@ def fetch_transcripts_for_ticker(ticker: str, limit: int = DEFAULT_CALLS_PER_TIC
     if cached and len(cached) >= limit and not force_refresh:
         return cached[:limit]
 
-    call_history = _fetch_company_call_history(ticker)
+    call_history = [call for call in _fetch_company_call_history(ticker) if _is_earnings_call(call)]
     transcripts = [_build_cached_call_record(ticker, call) for call in call_history[:limit]]
     save_cached_transcripts(ticker, transcripts)
     return transcripts
@@ -153,23 +171,29 @@ def load_cached_transcript_text(ticker: str, limit: int = DEFAULT_CALLS_PER_TICK
     return "\n\n====\n\n".join(call_sections)
 
 
-def fetch_last_four_for_sp500(force_refresh: bool = False) -> dict[str, int]:
+def fetch_recent_calls_for_sp500(force_refresh: bool = False) -> dict[str, Any]:
     tickers = load_sp500_tickers()
     fetched = 0
     cached = 0
+    failures: dict[str, str] = {}
 
     for ticker in tickers:
         existing = load_cached_transcripts(ticker)
         if existing and len(existing) >= DEFAULT_CALLS_PER_TICKER and not force_refresh:
             cached += 1
             continue
-        fetch_transcripts_for_ticker(ticker, limit=DEFAULT_CALLS_PER_TICKER, force_refresh=force_refresh)
-        fetched += 1
+        try:
+            fetch_transcripts_for_ticker(ticker, limit=DEFAULT_CALLS_PER_TICKER, force_refresh=force_refresh)
+            fetched += 1
+        except Exception as exc:
+            failures[ticker] = str(exc)
 
     return {
         "tickers_total": len(tickers),
         "tickers_fetched": fetched,
         "tickers_cached": cached,
+        "tickers_failed": len(failures),
+        "failures": failures,
         "calls_per_ticker": DEFAULT_CALLS_PER_TICKER,
         "cache_dir": str(CACHE_DIR),
     }
@@ -188,7 +212,7 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps({"ticker": args.ticker.upper(), "count": len(transcripts), "cache_path": str(_cache_path_for_ticker(args.ticker))}, indent=2))
         return
 
-    summary = fetch_last_four_for_sp500(force_refresh=args.force_refresh)
+    summary = fetch_recent_calls_for_sp500(force_refresh=args.force_refresh)
     print(json.dumps(summary, indent=2))
 
 

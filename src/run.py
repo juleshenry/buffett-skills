@@ -99,6 +99,11 @@ def _make_json_safe(value):
     return value
 
 
+def _write_analysis_output(path: Path, data: dict) -> None:
+    with path.open("w") as f:
+        json.dump(_make_json_safe(data), f, indent=2)
+
+
 def _build_real_context(ticker: str) -> dict:
     context = {
         "ticker": ticker,
@@ -264,10 +269,14 @@ def analyze_company(ticker: str) -> dict:
     results["industry"] = context.get("industry", "")
     results["description"] = context.get("display_description") or context.get("description", "")
 
+    output_filename = OUTPUT_DIR / f"{ticker}_analysis.json"
+    _write_analysis_output(output_filename, results)
+
     heuristic_modules = get_all_heuristic_classes()
 
     for mod_name, class_list in heuristic_modules.items():
         results[mod_name] = {}
+        _write_analysis_output(output_filename, results)
         for cls in class_list:
             cls_name = cls.__name__
             logger.info(f"Evaluating {cls_name}...")
@@ -279,6 +288,7 @@ def analyze_company(ticker: str) -> dict:
                         "error": "Missing real inputs",
                         "missing_inputs": missing,
                     }
+                    _write_analysis_output(output_filename, results)
                     continue
 
                 output = instance.evaluate(**kwargs)
@@ -289,6 +299,7 @@ def analyze_company(ticker: str) -> dict:
             except Exception as e:
                 logger.error(f"Error in {cls_name}: {e}")
                 results[mod_name][cls_name] = {"error": str(e)}
+            _write_analysis_output(output_filename, results)
 
     return results
 
@@ -313,16 +324,16 @@ def main(argv=None):
         if len(analyses) < 2:
             raise ValueError("Need at least two valid analysis files to build a comparison")
     else:
-        analyses = []
         tickers = [ticker.upper() for ticker in args.tickers]
         for ticker_symbol in tickers:
             logger.info(f"Starting exhaustive 49-heuristic pipeline for {ticker_symbol}...")
-            final_output = _make_json_safe(analyze_company(ticker_symbol))
-            analyses.append(final_output)
+            analyze_company(ticker_symbol)
             output_filename = OUTPUT_DIR / f"{ticker_symbol}_analysis.json"
-            with output_filename.open("w") as f:
-                json.dump(final_output, f, indent=2)
             logger.info(f"Successfully saved full analysis to {output_filename}")
+
+        analyses = comparison_scoring.load_analysis_files(
+            [OUTPUT_DIR / f"{ticker_symbol}_analysis.json" for ticker_symbol in tickers]
+        )
 
     if len(analyses) > 1:
         comparison = comparison_scoring.build_comparison(analyses)

@@ -14,7 +14,6 @@ import management_governance
 import financial_metrics
 import valuation_capital
 import risk_behavior
-import industry_playbooks
 
 class TestAOSIntegration(unittest.TestCase):
     
@@ -176,25 +175,10 @@ class TestAOSIntegration(unittest.TestCase):
             self.assertIsNotNone(result)
             self.assertEqual(result.get("total_operating_lease_obligations"), 50000000)
 
-    @patch('industry_playbooks.query_ollama')
-    def test_08_industry_playbooks(self, mock_query_ollama):
-        mock_query_ollama.return_value = {
-            "capital_adequate": True,
-            "risk_summary": "Adequate"
-        }
-        
-        # AOS isn't a bank or insurance, but let's test the bank logic anyway 
-        # to ensure the function works. We'll capture stdout to verify it runs.
-        import io
-        import contextlib
-        
-        f = io.StringIO()
-        with contextlib.redirect_stdout(f):
-            industry_playbooks.analyze_bank(self.ticker)
-            
-        output = f.getvalue()
-        self.assertIn(self.ticker, output)
-        self.assertIn("Adequate", output)
+    # industry_playbooks was deliberately removed from the universal ticker
+    # pipeline (industry-specific evaluators require inputs no single pipeline
+    # run can supply for every ticker) -- see plan.md. Its test was removed
+    # along with it here.
 
 if __name__ == "__main__":
     unittest.main()
