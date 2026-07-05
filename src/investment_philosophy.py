@@ -6,14 +6,16 @@ from typing import List, Optional
 
 from evaluator_config import DEFAULT_BENCHMARK, DEFAULT_INTRINSIC_VALUE_YEARS, DEFAULT_LOOKBACK_YEARS
 from evaluator_thresholds import (
-    EFFICIENT_MARKET_EXCESS_RETURN_MAX,
-    EFFICIENT_MARKET_TRACKING_ERROR_MAX,
-    FOCUS_INVESTING_TOP_THREE_WEIGHT_MIN,
-    MARKET_FORECAST_USEFUL_ERROR_MAX,
     UNDERVALUED_MARGIN_MIN,
 )
 from valuation_capital import fetch_risk_free_rate
 from valuation_capital import IntrinsicValueEstimation, MarginOfSafety
+
+
+def _calculate_cagr(start_value: float, end_value: float, years: float) -> float:
+    if start_value <= 0 or years <= 0:
+        return 0.0
+    return (end_value / start_value) ** (1 / years) - 1
 
 
 def fetch_price_comparison_data(
@@ -21,7 +23,7 @@ def fetch_price_comparison_data(
     years: int = DEFAULT_LOOKBACK_YEARS,
     benchmark: str = DEFAULT_BENCHMARK,
 ) -> dict:
-    result_df = Compounding().evaluate([ticker], years=years, benchmark=benchmark)
+    result_df = fetch_batch_cagrs([ticker], years=years, benchmark=benchmark)
     if result_df.empty:
         raise ValueError(f"No price comparison data fetched for {ticker}")
 
@@ -89,119 +91,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"An error occurred: {e}")
 
-class FocusInvesting:
-    """
-    Heuristic: Focus Investing
-    """
-    def __init__(self):
-        pass
-
-    def evaluate(self, positions: List[float] | None = None, ticker: str = "") -> dict:
-        if ticker and not positions:
-            positions = [1.0] # Default to 100% allocation for a single stock analysis
-            
-        if not positions:
-            raise ValueError("positions must not be empty")
-
-        total = sum(positions)
-        if total <= 0:
-            raise ValueError("positions must sum to a positive number")
-
-        weights = [position / total for position in positions]
-        top_position_weight = max(weights)
-        top_three_weight = sum(sorted(weights, reverse=True)[:3])
-
-        return {
-            "position_count": len(positions),
-            "top_position_weight": top_position_weight,
-            "top_three_weight": top_three_weight,
-            "is_focus_investing": top_three_weight >= FOCUS_INVESTING_TOP_THREE_WEIGHT_MIN
-        }
-
-    def _helper_method(self):
-        """
-        Example helper method. All internal logic should be _ prefixed.
-        """
-        pass
-
-class EfficientMarketTheory:
-    """
-    Heuristic: Efficient Market Theory
-    """
-    def __init__(self):
-        pass
-
-    def evaluate(
-        self,
-        stock_cagr: Optional[float] = None,
-        benchmark_cagr: Optional[float] = None,
-        tracking_error: Optional[float] = None,
-        ticker: str = "",
-        years: int = DEFAULT_LOOKBACK_YEARS,
-        benchmark: str = DEFAULT_BENCHMARK,
-    ) -> dict:
-        if ticker and (stock_cagr is None or benchmark_cagr is None or tracking_error is None):
-            price_data = fetch_price_comparison_data(ticker, years=years, benchmark=benchmark)
-            stock_cagr = price_data["stock_cagr"]
-            benchmark_cagr = price_data["benchmark_cagr"]
-            tracking_error = price_data["tracking_error"]
-
-        if stock_cagr is None or benchmark_cagr is None or tracking_error is None:
-            raise ValueError("stock_cagr, benchmark_cagr, and tracking_error are required")
-
-        excess_return = stock_cagr - benchmark_cagr
-        market_efficiency_supported = abs(excess_return) <= EFFICIENT_MARKET_EXCESS_RETURN_MAX and tracking_error <= EFFICIENT_MARKET_TRACKING_ERROR_MAX
-
-        return {
-            "stock_cagr": stock_cagr,
-            "benchmark_cagr": benchmark_cagr,
-            "tracking_error": tracking_error,
-            "excess_return": excess_return,
-            "market_efficiency_supported": market_efficiency_supported
-        }
-
-    def _helper_method(self):
-        """
-        Example helper method. All internal logic should be _ prefixed.
-        """
-        pass
-
-class MarketForecasting:
-    """
-    Heuristic: Market Forecasting
-    """
-    def __init__(self):
-        pass
-
-    def evaluate(
-        self,
-        forecast_return: Optional[float] = None,
-        actual_return: Optional[float] = None,
-        ticker: str = "",
-        years: int = DEFAULT_LOOKBACK_YEARS,
-        benchmark: str = DEFAULT_BENCHMARK,
-    ) -> dict:
-        if ticker and actual_return is None:
-            price_data = fetch_price_comparison_data(ticker, years=years, benchmark=benchmark)
-            actual_return = price_data["stock_cagr"]
-
-        if forecast_return is None or actual_return is None:
-            raise ValueError("forecast_return and actual_return are required")
-
-        forecast_error = actual_return - forecast_return
-        return {
-            "forecast_return": forecast_return,
-            "actual_return": actual_return,
-            "forecast_error": forecast_error,
-            "forecast_was_useful": abs(forecast_error) <= MARKET_FORECAST_USEFUL_ERROR_MAX
-        }
-
-    def _helper_method(self):
-        """
-        Example helper method. All internal logic should be _ prefixed.
-        """
-        pass
-
 class UndervaluedMarginOfSafety:
     """
     Heuristic: Undervalued & Margin of Safety
@@ -222,7 +111,7 @@ class UndervaluedMarginOfSafety:
             market_price = intrinsic_result["market_price"]
 
         if intrinsic_value is None or market_price is None:
-            raise ValueError("intrinsic_value and market_price are required")
+            return {"applicable": False, "reason": "Missing required metrics: intrinsic_value and market_price are required"}
 
         result = MarginOfSafety().evaluate(intrinsic_value, market_price)
         result["minimum_margin"] = minimum_margin
@@ -235,75 +124,57 @@ class UndervaluedMarginOfSafety:
         """
         pass
 
-class Compounding:
+def fetch_batch_cagrs(tickers: List[str], years: int = DEFAULT_LOOKBACK_YEARS, benchmark: str = DEFAULT_BENCHMARK) -> pd.DataFrame:
     """
-    Heuristic: Compounding
+    Fetches price history and calculates CAGR.
+    Uses batch downloading for network efficiency and exact date alignment.
     """
-    def __init__(self):
-        pass
+    end_date = datetime.today()
+    start_date = end_date - relativedelta(years=years)
 
-    def evaluate(self, tickers: List[str], years: int = DEFAULT_LOOKBACK_YEARS, benchmark: str = DEFAULT_BENCHMARK) -> pd.DataFrame:
-        """
-        Fetches price history and calculates CAGR.
-        Uses batch downloading for network efficiency and exact date alignment.
-        """
-        end_date = datetime.today()
-        start_date = end_date - relativedelta(years=years)
-        
-        # 1. Combine all symbols for a single batch download
-        all_symbols = tickers + [benchmark]
-        
-        # yf.download is significantly faster and inherently aligns dates
-        df_raw = yf.download(
-            all_symbols,
-            start=start_date.strftime('%Y-%m-%d'),
-            end=end_date.strftime('%Y-%m-%d'),
-            progress=False
-        )
-        
-        if df_raw.empty:
-            raise ValueError("No data fetched. Check your network or ticker symbols.")
-            
-        # 2. Extract 'Close' prices (yf.download returns a MultiIndex DataFrame)
-        prices = df_raw['Close'] if 'Close' in df_raw else df_raw
-            
-        results = []
-        
-        # 3. Process each ticker independently against the benchmark
-        for ticker in tickers:
-            if ticker not in prices.columns:
-                results.append({"Ticker": ticker, "Error": "Data not found"})
-                continue
-                
-            aligned_data = prices[[ticker, benchmark]].dropna()
-            
-            if len(aligned_data) < 2:
-                results.append({"Ticker": ticker, "Error": "Insufficient data"})
-                continue
-                
-            actual_years = (aligned_data.index[-1] - aligned_data.index[0]).days / 365.25
-            
-            if actual_years <= 0:
-                continue
-                
-            stock_cagr = self._calculate_cagr(aligned_data[ticker].iloc[0], aligned_data[ticker].iloc[-1], actual_years)
-            bench_cagr = self._calculate_cagr(aligned_data[benchmark].iloc[0], aligned_data[benchmark].iloc[-1], actual_years)
-            
-            results.append({
+    all_symbols = tickers + [benchmark]
+    df_raw = yf.download(
+        all_symbols,
+        start=start_date.strftime('%Y-%m-%d'),
+        end=end_date.strftime('%Y-%m-%d'),
+        progress=False,
+    )
+
+    if df_raw.empty:
+        raise ValueError("No data fetched. Check your network or ticker symbols.")
+
+    prices = df_raw['Close'] if 'Close' in df_raw else df_raw
+    results = []
+
+    for ticker in tickers:
+        if ticker not in prices.columns:
+            results.append({"Ticker": ticker, "Error": "Data not found"})
+            continue
+
+        aligned_data = prices[[ticker, benchmark]].dropna()
+        if len(aligned_data) < 2:
+            results.append({"Ticker": ticker, "Error": "Insufficient data"})
+            continue
+
+        actual_years = (aligned_data.index[-1] - aligned_data.index[0]).days / 365.25
+        if actual_years <= 0:
+            continue
+
+        stock_cagr = _calculate_cagr(aligned_data[ticker].iloc[0], aligned_data[ticker].iloc[-1], actual_years)
+        bench_cagr = _calculate_cagr(aligned_data[benchmark].iloc[0], aligned_data[benchmark].iloc[-1], actual_years)
+
+        results.append(
+            {
                 "Ticker": ticker,
                 "Period (Yrs)": round(actual_years, 2),
                 "Stock CAGR": stock_cagr,
                 "Benchmark CAGR": bench_cagr,
-                "Outperformed?": "Yes" if stock_cagr > bench_cagr else "No"
-            })
-            
-        return pd.DataFrame(results)
+                "Outperformed?": "Yes" if stock_cagr > bench_cagr else "No",
+            }
+        )
 
-    def _calculate_cagr(self, start_value: float, end_value: float, years: float) -> float:
-        """Calculates the Compound Annual Growth Rate."""
-        if start_value <= 0 or years <= 0:
-            return 0.0
-        return (end_value / start_value) ** (1 / years) - 1
+    return pd.DataFrame(results)
+
 
 class IntrinsicValue:
     """
@@ -327,7 +198,7 @@ class IntrinsicValue:
             return IntrinsicValueEstimation().evaluate(ticker=ticker, terminal_growth_rate=terminal_growth_rate, years=years)
 
         if any(value is None for value in (fcf, growth_rate, discount_rate, shares_outstanding, net_debt)):
-            raise ValueError("fcf, growth_rate, discount_rate, shares_outstanding, and net_debt are required")
+            return {"applicable": False, "reason": "Missing required metrics: fcf, growth_rate, discount_rate, shares_outstanding, and net_debt are required"}
 
         return IntrinsicValueEstimation().evaluate(
             fcf=fcf,

@@ -5,6 +5,7 @@ import re
 from typing import Dict, Any, Optional
 import yfinance as yf
 from transformers import pipeline
+from earnings_calls import load_cached_transcript_text
 from evaluator_config import DEFAULT_OLLAMA_HOST, DEFAULT_OLLAMA_MODEL, call_ollama_panel_json, call_ollama_panel_text
 from evaluator_thresholds import (
     ACQUISITION_PURCHASE_MULTIPLE_MAX,
@@ -15,7 +16,7 @@ from evaluator_thresholds import (
     GOVERNANCE_INSIDER_OWNERSHIP_MIN,
     GOVERNANCE_STRONG_SCORE_MIN,
 )
-from sec_data import fetch_filing_keyword_context, fetch_filing_section, fetch_latest_filing_text
+from sec_data import fetch_filing_section, fetch_filing_keyword_context, fetch_latest_filing_text
 
 
 def analyze_management_governance(ticker: str, transcript: Optional[str] = None, proxy_statement: Optional[str] = None) -> str:
@@ -59,28 +60,13 @@ class ManagementGovernanceAnalyzer:
             return {"error": f"Unexpected error: {str(e)}"}
 
     def _fetch_earnings_call_transcript(self, ticker: str) -> str:
-        keyword_sets = (
-            ("8-K", ("conference call", "earnings call", "prepared remarks", "question-and-answer", "results of operations and financial condition")),
-            ("10-Q", ("results of operations", "liquidity and capital resources", "capital allocation")),
-            ("10-K", ("results of operations", "liquidity and capital resources", "capital allocation")),
+        transcript_text = load_cached_transcript_text(ticker)
+        if transcript_text:
+            return transcript_text
+        raise RuntimeError(
+            f"No cached earnings call transcripts found for {ticker}. "
+            "Run src/earnings_calls.py first to populate output/earnings_calls/."
         )
-
-        for form, keywords in keyword_sets:
-            try:
-                commentary = fetch_filing_keyword_context(
-                    ticker,
-                    form=form,
-                    keywords=keywords,
-                    context_chars=1600,
-                    max_matches=3,
-                    max_chars=9000,
-                )
-                if commentary:
-                    return commentary
-            except Exception:
-                continue
-
-        raise RuntimeError(f"No SEC management commentary available for {ticker}.")
 
     def _fetch_sec_def_14a(self, ticker: str) -> str:
         return fetch_filing_section(
@@ -93,7 +79,6 @@ class ManagementGovernanceAnalyzer:
 
     def analyze(self, ticker: str, transcript: Optional[str] = None, proxy_statement: Optional[str] = None) -> str:
         """Runs the management governance analysis workflow and returns a JSON string."""
-        
         # 1. Fetch raw data
         transcript = transcript or self._fetch_earnings_call_transcript(ticker)
         proxy_statement = proxy_statement or self._fetch_sec_def_14a(ticker)
@@ -198,10 +183,13 @@ class ManagementEvaluation:
             return {"error": str(e), "response": f"Error connecting to Ollama: {e}"}
 
     def _fetch_earnings_call_transcript(self, ticker: str) -> str:
-        return ManagementGovernanceAnalyzer(
-            ollama_model=self.ollama_model,
-            ollama_host=self.ollama_host,
-        )._fetch_earnings_call_transcript(ticker)
+        transcript_text = load_cached_transcript_text(ticker)
+        if transcript_text:
+            return transcript_text
+        raise RuntimeError(
+            f"No cached earnings call transcripts found for {ticker}. "
+            "Run src/earnings_calls.py first to populate output/earnings_calls/."
+        )
 
     def _fetch_sec_def_14a(self, ticker: str) -> str:
         return fetch_filing_section(

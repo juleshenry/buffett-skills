@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 
 
+PIPELINE_REQUIRED_REAL_INPUTS = {
+    "MarketForecasting": {"forecast_return"},
+}
+
+
 def _coerce_float(value):
     if value is None:
         return None
@@ -202,6 +207,7 @@ def _prepare_evaluator_inputs(instance, context: dict) -> tuple[dict, list[str]]
     params = inspect.signature(instance.evaluate).parameters
     kwargs = {}
     missing = []
+    required_real_inputs = PIPELINE_REQUIRED_REAL_INPUTS.get(instance.__class__.__name__, set())
 
     for param_name, param in params.items():
         if param_name == "self":
@@ -212,7 +218,7 @@ def _prepare_evaluator_inputs(instance, context: dict) -> tuple[dict, list[str]]
         value = _resolve_param_value(instance.__class__.__name__, param_name, context)
         if _has_real_value(value):
             kwargs[param_name] = value
-        elif param.default is inspect.Parameter.empty:
+        elif param.default is inspect.Parameter.empty or param_name in required_real_inputs:
             missing.append(param_name)
 
     return kwargs, missing

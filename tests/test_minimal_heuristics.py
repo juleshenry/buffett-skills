@@ -11,10 +11,10 @@ from financial_metrics import KeyFinancialMetrics
 from financial_metrics import LookthroughEarnings
 from business_moat import BusinessModelTypes, TheDurabilityOfCompetitiveAdvantage
 from business_moat import GoodwillEconomicGoodwillVsAccountingGoodwill
-from investment_philosophy import EfficientMarketTheory, FocusInvesting, IntrinsicValue, MarketForecasting, UndervaluedMarginOfSafety
+from investment_philosophy import IntrinsicValue, UndervaluedMarginOfSafety
 from management_governance import CorporateGovernanceAndShareholderOrientation
 from management_governance import AcquisitionLogicAcquisitionCriteria, CorporateCulture
-from thinking_frameworks import IndependentThinking, LongtermOrientation, MrMarket, MungersLatticeOfMentalModels, OpportunityCostAwareness, PatienceAsEdge
+from thinking_frameworks import MrMarket
 from valuation_capital import CapitalAllocationAnalysis, MarginOfSafety, TheRelationshipBetweenPurchasePriceAndIntrinsicValue
 from valuation_capital import DividendsRetainedEarningsAndTaxEfficiency
 from valuation_capital import SpecialInvestmentInstruments
@@ -25,8 +25,8 @@ from evaluator_config import (
     call_ollama_panel_json,
 )
 from sec_data import extract_keyword_context
-from risk_behavior import ValueTraps, WhenToSellClearCriteria
-from risk_behavior import CommonBehavioralBiasesPsychologicalTrapsInInvesting, DerivativesRisk
+from risk_behavior import ValueTraps
+from risk_behavior import DerivativesRisk
 from financial_metrics import CorePrincipleSeeThroughAccountingToEconomicReality, OwnerEarnings, normalize_capex_breakdown
 from industry_playbooks import ConsumerBrandsRetail, EnergyUtilities, IndustriesToAvoidCounterexamples, InsuranceFloat, MediaPublishing, Railways, TechnologyInternet, UnderwritingDiscipline
 import investment_philosophy
@@ -36,6 +36,18 @@ import valuation_capital
 from management_governance import ManagementEvaluation
 from risk_behavior import LeverageRisk
 from valuation_capital import normalize_buyback_analysis
+from principles_bot import (
+    CommonBehavioralBiasesPrinciple,
+    CompoundingPrinciple,
+    EfficientMarketTheoryPrinciple,
+    FocusInvestingPrinciple,
+    IndependentThinkingPrinciple,
+    LongtermOrientationPrinciple,
+    MarketForecastingPrinciple,
+    OpportunityCostAwarenessPrinciple,
+    PatienceAsEdgePrinciple,
+    WhenToSellPrinciple,
+)
 
 
 class TestMinimalHeuristics(unittest.TestCase):
@@ -54,6 +66,8 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertTrue(result["inside_circle"])
         self.assertEqual(result["confidence"], 63)
         self.assertEqual(result["panel_vote_split"]["inside_circle"], 2)
+        self.assertIn("qwen2.5:7b", result["panel_judgments"])
+        self.assertEqual(result["panel_judgments"]["llama3"]["confidence"], 70)
 
     @patch("thinking_frameworks.fetch_filing_section")
     @patch("thinking_frameworks.call_ollama_panel_json")
@@ -63,6 +77,10 @@ class TestMinimalHeuristics(unittest.TestCase):
             "inside_circle": True,
             "confidence": 63,
             "explanation": "Simple business.",
+            "panel_judgments": {
+                "qwen2.5:7b": {"inside_circle": True, "confidence": 80, "explanation": "Simple business."},
+                "llama3": {"inside_circle": True, "confidence": 70, "explanation": "Easy to understand."},
+            },
             "panel_vote_split": {"inside_circle": 2, "outside_circle": 1},
         }
 
@@ -71,6 +89,7 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertTrue(result["inside_circle"])
         self.assertEqual(result["confidence"], 63)
         self.assertEqual(result["panel_vote_split"]["inside_circle"], 2)
+        self.assertIn("qwen2.5:7b", result["panel_judgments"])
 
     @patch("evaluator_config.time.sleep")
     @patch("evaluator_config.requests.post")
@@ -90,7 +109,7 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
 
         self.assertTrue(result["inside_circle"])
-        self.assertEqual(mock_sleep.call_count, 2)
+        self.assertEqual(mock_sleep.call_count, 1)
 
     def test_margin_of_safety(self):
         result = MarginOfSafety().evaluate(intrinsic_value=100.0, market_price=70.0)
@@ -130,7 +149,7 @@ class TestMinimalHeuristics(unittest.TestCase):
         mock_fetch_metrics.assert_called_once_with("AAPL")
 
     def test_when_to_sell(self):
-        result = WhenToSellClearCriteria().evaluate(
+        result = WhenToSellPrinciple().evaluate(
             thesis_broken=False,
             better_opportunity_available=True,
             extreme_overvaluation=False,
@@ -164,43 +183,18 @@ class TestMinimalHeuristics(unittest.TestCase):
         mock_fetch_financials.assert_called_once_with("AAPL")
 
     def test_long_term_orientation(self):
-        result = LongtermOrientation().evaluate(stock_cagr=0.14, benchmark_cagr=0.09, years=7)
+        result = LongtermOrientationPrinciple().evaluate(stock_cagr=0.14, benchmark_cagr=0.09, years=7)
         self.assertEqual(result["long_term_orientation"], "strong")
         self.assertAlmostEqual(result["excess_return"], 0.05)
 
-    @patch("thinking_frameworks.fetch_price_comparison_data")
-    def test_long_term_orientation_fetches_real_price_data_for_ticker(self, mock_price_data):
-        mock_price_data.return_value = {
-            "stock_cagr": 0.14,
-            "benchmark_cagr": 0.09,
-            "period_years": 7.0,
-        }
-
-        result = LongtermOrientation().evaluate(ticker="AAPL")
-        self.assertEqual(result["long_term_orientation"], "strong")
-        mock_price_data.assert_called_once()
-
     def test_opportunity_cost_awareness(self):
-        result = OpportunityCostAwareness().evaluate(
+        result = OpportunityCostAwarenessPrinciple().evaluate(
             candidate_return=0.15,
             hurdle_return=0.10,
             alternative_return=0.12,
         )
         self.assertTrue(result["clears_opportunity_cost"])
         self.assertAlmostEqual(result["excess_return_vs_best_alternative"], 0.03)
-
-    @patch("thinking_frameworks.fetch_risk_free_rate")
-    @patch("thinking_frameworks.fetch_price_comparison_data")
-    def test_opportunity_cost_awareness_fetches_real_market_inputs(self, mock_price_data, mock_risk_free):
-        mock_price_data.return_value = {
-            "stock_cagr": 0.15,
-            "benchmark_cagr": 0.12,
-        }
-        mock_risk_free.return_value = 0.04
-
-        result = OpportunityCostAwareness().evaluate(ticker="AAPL")
-        self.assertTrue(result["clears_opportunity_cost"])
-        self.assertAlmostEqual(result["best_alternative"], 0.12)
 
     def test_capital_allocation_analysis(self):
         result = CapitalAllocationAnalysis().evaluate(
@@ -258,6 +252,30 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
         self.assertAlmostEqual(result["lookthrough_earnings"], 50.0)
         self.assertAlmostEqual(result["retained_earnings_share"], 30.0)
+
+    @patch("financial_metrics.fetch_lookthrough_commentary")
+    def test_lookthrough_earnings_fetches_real_investee_inputs_for_ticker(self, mock_fetch_commentary):
+        mock_fetch_commentary.return_value = (
+            "The company holds a 25% ownership interest in the investee. "
+            "Equity in earnings was $200 million. Dividends received totaled $20 million."
+        )
+
+        result = LookthroughEarnings().evaluate(ticker="AAPL")
+
+        self.assertAlmostEqual(result["ownership_percentage"], 0.25)
+        self.assertAlmostEqual(result["investee_net_income"], 200_000_000.0)
+        self.assertAlmostEqual(result["dividends_received"], 20_000_000.0)
+        self.assertAlmostEqual(result["lookthrough_earnings"], 50_000_000.0)
+        self.assertAlmostEqual(result["retained_earnings_share"], 30_000_000.0)
+
+    @patch("financial_metrics.fetch_lookthrough_commentary")
+    def test_lookthrough_earnings_returns_not_applicable_when_no_investee_evidence_found(self, mock_fetch_commentary):
+        mock_fetch_commentary.return_value = ""
+
+        result = LookthroughEarnings().evaluate(ticker="AAPL")
+
+        self.assertFalse(result["applicable"])
+        self.assertIn("No material equity investee evidence", result["reason"])
 
     def test_business_model_type(self):
         result = BusinessModelTypes().evaluate(
@@ -333,45 +351,24 @@ class TestMinimalHeuristics(unittest.TestCase):
         mock_fetch_metrics.assert_called_once_with("CB")
 
     def test_focus_investing(self):
-        result = FocusInvesting().evaluate([40.0, 25.0, 15.0, 10.0, 10.0])
+        result = FocusInvestingPrinciple().evaluate([40.0, 25.0, 15.0, 10.0, 10.0])
         self.assertEqual(result["position_count"], 5)
         self.assertTrue(result["is_focus_investing"])
         self.assertAlmostEqual(result["top_three_weight"], 0.8)
 
     def test_efficient_market_theory(self):
-        result = EfficientMarketTheory().evaluate(
+        result = EfficientMarketTheoryPrinciple().evaluate(
             stock_cagr=0.09,
             benchmark_cagr=0.08,
             tracking_error=0.03,
         )
         self.assertTrue(result["market_efficiency_supported"])
 
-    @patch("investment_philosophy.fetch_price_comparison_data")
-    def test_efficient_market_theory_fetches_real_price_data_for_ticker(self, mock_price_data):
-        mock_price_data.return_value = {
-            "stock_cagr": 0.09,
-            "benchmark_cagr": 0.08,
-            "tracking_error": 0.03,
-        }
-        result = EfficientMarketTheory().evaluate(ticker="AAPL")
-        self.assertTrue(result["market_efficiency_supported"])
-        mock_price_data.assert_called_once()
-
     def test_market_forecasting(self):
-        result = MarketForecasting().evaluate(
+        result = MarketForecastingPrinciple().evaluate(
             forecast_return=0.10,
             actual_return=0.12,
         )
-        self.assertAlmostEqual(result["forecast_error"], 0.02)
-        self.assertTrue(result["forecast_was_useful"])
-
-    @patch("investment_philosophy.fetch_price_comparison_data")
-    def test_market_forecasting_fetches_real_actual_return_for_ticker(self, mock_price_data):
-        mock_price_data.return_value = {
-            "stock_cagr": 0.12,
-        }
-
-        result = MarketForecasting().evaluate(forecast_return=0.10, ticker="AAPL")
         self.assertAlmostEqual(result["forecast_error"], 0.02)
         self.assertTrue(result["forecast_was_useful"])
 
@@ -596,7 +593,7 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertIn("Pricing_Power_Assessment", result.columns)
 
     def test_independent_thinking(self):
-        result = IndependentThinking().evaluate(
+        result = IndependentThinkingPrinciple().evaluate(
             thesis_differs_from_consensus=True,
             evidence_strength=0.8,
             valuation_gap=0.20,
@@ -672,8 +669,30 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["instrument_score"], 3)
         self.assertEqual(result["instrument_attractiveness"], "high")
 
+    @patch("valuation_capital.fetch_special_instrument_commentary")
+    def test_special_investment_instruments_fetches_real_filing_context_for_ticker(self, mock_fetch_commentary):
+        mock_fetch_commentary.return_value = (
+            "The company issued convertible preferred stock with a dividend rate of 9%. "
+            "Investors received a conversion discount of 12%. The instrument is secured by collateral."
+        )
+
+        result = SpecialInvestmentInstruments().evaluate(ticker="AAPL")
+
+        self.assertEqual(result["instrument_score"], 3)
+        self.assertEqual(result["instrument_attractiveness"], "high")
+        mock_fetch_commentary.assert_called_once_with("AAPL")
+
+    @patch("valuation_capital.fetch_special_instrument_commentary")
+    def test_special_investment_instruments_returns_not_applicable_when_no_evidence_found(self, mock_fetch_commentary):
+        mock_fetch_commentary.return_value = ""
+
+        result = SpecialInvestmentInstruments().evaluate(ticker="AAPL")
+
+        self.assertFalse(result["applicable"])
+        self.assertIn("No special investment instrument evidence", result["reason"])
+
     def test_behavioral_biases(self):
-        result = CommonBehavioralBiasesPsychologicalTrapsInInvesting().evaluate(
+        result = CommonBehavioralBiasesPrinciple().evaluate(
             thesis_changes_after_price_move=True,
             avg_holding_period_years=0.5,
             adds_to_losers_without_new_evidence=False,
@@ -681,16 +700,8 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["bias_count"], 2)
         self.assertEqual(result["behavioral_risk"], "high")
 
-    def test_mungers_lattice(self):
-        result = MungersLatticeOfMentalModels().evaluate(
-            economics_score=0.8,
-            psychology_score=0.7,
-            accounting_score=0.9,
-        )
-        self.assertEqual(result["lattice_assessment"], "broad")
-
     def test_patience_as_edge(self):
-        result = PatienceAsEdge().evaluate(
+        result = PatienceAsEdgePrinciple().evaluate(
             avg_holding_period_years=5,
             turnover_ratio=0.20,
             forced_activity=False,
@@ -815,11 +826,15 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(kwargs["transcript"], "Transcript text")
         self.assertEqual(kwargs["proxy_stmt"], "Proxy text")
 
-    @patch("management_governance.fetch_filing_keyword_context")
-    def test_management_evaluation_fetches_sec_commentary(self, mock_fetch_context):
-        mock_fetch_context.return_value = "Management discussed capital allocation and operating conditions."
+    def test_management_evaluation_requires_cached_transcript(self):
+        with self.assertRaises(RuntimeError):
+            ManagementEvaluation()._fetch_earnings_call_transcript("YUM")
+
+    @patch("management_governance.load_cached_transcript_text")
+    def test_management_evaluation_reads_cached_transcript(self, mock_load_cached):
+        mock_load_cached.return_value = "CEO: We repurchased shares opportunistically."
         result = ManagementEvaluation()._fetch_earnings_call_transcript("YUM")
-        self.assertIn("capital allocation", result)
+        self.assertIn("repurchased shares", result)
 
     @patch("thinking_frameworks.fetch_filing_section")
     @patch("thinking_frameworks.yf.Ticker")
@@ -882,20 +897,9 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertTrue(normalized["mentions_intrinsic_value"])
         self.assertEqual(normalized["analysis_summary"], "Management discusses intrinsic value explicitly.")
 
-    @patch("investment_philosophy.Compounding.evaluate")
-    def test_analyze_investment_philosophy(self, mock_evaluate):
-        mock_evaluate.return_value = pd.DataFrame([
-            {
-                "Ticker": "YUM",
-                "Period (Yrs)": 10.0,
-                "Stock CAGR": 0.12,
-                "Benchmark CAGR": 0.10,
-                "Outperformed?": "Yes",
-            }
-        ])
-        result = investment_philosophy.analyze_investment_philosophy("YUM")
-        self.assertEqual(result["ticker"], "YUM")
-        self.assertTrue(result["outperformed_benchmark"])
+    def test_compounding_principle(self):
+        result = CompoundingPrinciple().evaluate(annual_return=0.10, years=10, initial_capital=1.0)
+        self.assertGreater(result["ending_value"], 2.5)
 
     @patch("thinking_frameworks.yf.Ticker")
     def test_mr_market_price_regime(self, mock_ticker):

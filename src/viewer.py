@@ -7,6 +7,7 @@ app = Flask(__name__)
 ROOT_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = ROOT_DIR / "output"
 REFERENCES_DIR = ROOT_DIR / "skills" / "buffett" / "references"
+PRINCIPLES_DIR = ROOT_DIR / "skills" / "buffett" / "principles"
 
 import re
 
@@ -126,6 +127,11 @@ TEMPLATE = """
                     About
                 </button>
             </li>
+            <li class="tab-item" data-ticker="Principles">
+                <button onclick="showTab('Principles')" id="tab-Principles" class="tab-btn w-full text-left px-4 py-3 rounded-xl font-bold transition-all duration-150 text-gray-600 hover:bg-gray-100">
+                    Principles
+                </button>
+            </li>
             {% for ticker in reports.keys()|sort %}
             <li class="tab-item" data-ticker="{{ ticker }}">
                 <button onclick="showTab('{{ ticker }}')" id="tab-{{ ticker }}" class="tab-btn w-full text-left px-4 py-3 rounded-xl font-bold transition-all duration-150 text-gray-600 hover:bg-gray-100">
@@ -145,13 +151,43 @@ TEMPLATE = """
             </div>
             
             <p class="text-gray-700 text-xl leading-relaxed mb-10 max-w-4xl">
-                This tool evaluates companies based on 49 core principles derived from Warren Buffett's investment philosophy. 
-                Below is the comprehensive raw documentation detailing each of these principles and the exact analytical 
-                playbooks they are based on.
+                This tool evaluates companies using the heuristics in the Buffett evaluator pipeline.
+                Below is the raw reference documentation for the company-analysis side of the system.
             </p>
 
             <div class="space-y-6 max-w-5xl">
                 {% for md_file in markdown_files %}
+                <details class="group bg-white shadow-sm border border-gray-200 rounded-2xl overflow-hidden transition-all duration-300 open:shadow-lg open:ring-1 open:ring-indigo-500/20">
+                    <summary class="cursor-pointer px-6 py-5 bg-white hover:bg-gray-50 transition-colors duration-200 flex items-center justify-between select-none">
+                        <div>
+                            <h4 class="text-xl font-bold text-gray-900">{{ md_file.name | replace('.md', '') | replace('-', ' ') | title }}</h4>
+                        </div>
+                        <span class="ml-4 flex-shrink-0 bg-gray-100 rounded-full p-2 group-open:bg-indigo-100 group-open:text-indigo-600 text-gray-400 transition-colors">
+                            <svg class="w-5 h-5 group-open:rotate-180 transition-transform duration-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                        </span>
+                    </summary>
+                    <div class="border-t border-gray-100 bg-white">
+                        <div class="p-8 overflow-x-auto">
+                            <div class="markdown-content hidden">{{ md_file.content }}</div>
+                        </div>
+                    </div>
+                </details>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div id="content-Principles" class="tab-content hidden max-w-6xl mx-auto pb-20 fade-in">
+            <div class="border-b border-gray-200 pb-6 mb-8">
+                <h2 class="text-5xl font-black text-gray-900 tracking-tight">Investor Principles</h2>
+                <h3 class="text-xl font-bold text-gray-600 mt-2">Notes to self for position sizing, holding, and behavior</h3>
+            </div>
+
+            <p class="text-gray-700 text-xl leading-relaxed mb-10 max-w-4xl">
+                These are investor principles rather than company evaluators. They guide how to choose, hold, size, and avoid behavioral mistakes.
+            </p>
+
+            <div class="space-y-6 max-w-5xl">
+                {% for md_file in principle_files %}
                 <details class="group bg-white shadow-sm border border-gray-200 rounded-2xl overflow-hidden transition-all duration-300 open:shadow-lg open:ring-1 open:ring-indigo-500/20">
                     <summary class="cursor-pointer px-6 py-5 bg-white hover:bg-gray-50 transition-colors duration-200 flex items-center justify-between select-none">
                         <div>
@@ -279,8 +315,17 @@ def index():
                 "name": os.path.basename(md_path),
                 "content": f.read()
             })
+
+    principle_files = []
+    principle_paths = sorted(glob.glob(str(PRINCIPLES_DIR / "*.md")))
+    for md_path in principle_paths:
+        with open(md_path, "r", encoding="utf-8") as f:
+            principle_files.append({
+                "name": os.path.basename(md_path),
+                "content": f.read()
+            })
             
-    return render_template_string(TEMPLATE, reports=reports, markdown_files=markdown_files)
+    return render_template_string(TEMPLATE, reports=reports, markdown_files=markdown_files, principle_files=principle_files)
 
 if __name__ == "__main__":
     print("Starting Buffett Skills Viewer on http://127.0.0.1:5052")

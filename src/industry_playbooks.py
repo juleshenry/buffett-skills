@@ -282,7 +282,7 @@ class UnderwritingDiscipline:
             combined_ratio = metrics.get("combined_ratio")
 
         if combined_ratio is None:
-            raise ValueError("combined_ratio is required")
+            return {"applicable": False, "reason": "Missing required metrics: combined_ratio is required"}
 
         if combined_ratio < UNDERWRITING_EXCELLENT_COMBINED_RATIO_MAX:
             assessment = "excellent"
@@ -327,7 +327,7 @@ class InsuranceFloat:
                 combined_ratio = metrics.get("combined_ratio")
 
         if current_float is None or prior_float is None or combined_ratio is None:
-            raise ValueError("current_float, prior_float, and combined_ratio are required")
+            return {"applicable": False, "reason": "Missing required metrics: current_float, prior_float, and combined_ratio are required"}
 
         float_growth = current_float - prior_float
         if float_growth > 0 and combined_ratio < UNDERWRITING_DISCIPLINED_COMBINED_RATIO_MAX:

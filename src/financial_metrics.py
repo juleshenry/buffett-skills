@@ -1,8 +1,9 @@
 import json
+import re
 import requests
 import yfinance as yf
 from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL, call_ollama_panel_json
-from sec_data import fetch_filing_section
+from sec_data import fetch_filing_keyword_context, fetch_filing_section
 
 
 def normalize_capex_breakdown(result: dict | None) -> dict:
@@ -98,6 +99,89 @@ def query_ollama_capex_breakdown(mda_text: str) -> dict:
         print(f"Error querying Ollama: {e}")
         return {}
 
+
+def fetch_lookthrough_commentary(ticker: str) -> str:
+    keyword_sets = (
+        ("10-K", ("equity method", "equity in earnings", "dividends received", "ownership interest", "investee")),
+        ("10-Q", ("equity method", "equity in earnings", "dividends received", "ownership interest", "investee")),
+    )
+
+    for form, keywords in keyword_sets:
+        try:
+            commentary = fetch_filing_keyword_context(
+                ticker,
+                form=form,
+                keywords=keywords,
+                context_chars=1800,
+                max_matches=4,
+                max_chars=12000,
+            )
+            if commentary:
+                return commentary
+        except Exception:
+            continue
+
+    return ""
+
+
+def _parse_lookthrough_inputs(commentary: str) -> dict:
+    ownership_percentage = None
+    ownership_match = re.search(
+        r"(\d+(?:\.\d+)?)\s*%\s+(?:ownership\s+interest|interest|stake)",
+        commentary,
+        flags=re.IGNORECASE,
+    )
+    if ownership_match:
+        ownership_percentage = float(ownership_match.group(1)) / 100.0
+
+    amounts = []
+    for match in re.finditer(r"\$\s*(\d+(?:\.\d+)?)\s*(million|billion)?", commentary, flags=re.IGNORECASE):
+        value = float(match.group(1))
+        unit = (match.group(2) or "").lower()
+        if unit == "billion":
+            value *= 1_000_000_000
+        elif unit == "million":
+            value *= 1_000_000
+        amounts.append((match.start(), value))
+
+    investee_net_income = None
+    dividends_received = None
+
+    income_match = re.search(
+        r"equity\s+in\s+earnings[^\$]{0,120}\$\s*(\d+(?:\.\d+)?)\s*(million|billion)?",
+        commentary,
+        flags=re.IGNORECASE,
+    )
+    if income_match:
+        investee_net_income = float(income_match.group(1))
+        unit = (income_match.group(2) or "").lower()
+        if unit == "billion":
+            investee_net_income *= 1_000_000_000
+        elif unit == "million":
+            investee_net_income *= 1_000_000
+
+    dividends_match = re.search(
+        r"dividends\s+received[^\$]{0,120}\$\s*(\d+(?:\.\d+)?)\s*(million|billion)?",
+        commentary,
+        flags=re.IGNORECASE,
+    )
+    if dividends_match:
+        dividends_received = float(dividends_match.group(1))
+        unit = (dividends_match.group(2) or "").lower()
+        if unit == "billion":
+            dividends_received *= 1_000_000_000
+        elif unit == "million":
+            dividends_received *= 1_000_000
+
+    has_investee_evidence = any(token in commentary.lower() for token in ("equity method", "equity in earnings", "investee"))
+
+    return {
+        "has_investee_evidence": has_investee_evidence,
+        "ownership_percentage": ownership_percentage,
+        "investee_net_income": investee_net_income,
+        "dividends_received": dividends_received,
+    }
+
 def main():
     tickers = ["AAPL", "MSFT"]
     
@@ -139,7 +223,7 @@ class CorePrincipleSeeThroughAccountingToEconomicReality:
             capex_total = financials.get("capex_total")
 
         if net_income is None or operating_cash_flow is None or capex_total is None:
-            raise ValueError("net_income, operating_cash_flow, and capex_total are required")
+            return {"applicable": False, "reason": "Missing required metrics: net_income, operating_cash_flow, and capex_total are required"}
 
         free_cash_flow = (operating_cash_flow or 0) - abs(capex_total or 0)
         accrual_gap = (net_income or 0) - (operating_cash_flow or 0)
@@ -175,11 +259,15 @@ class OwnerEarnings:
         mda_text = self._fetch_mda_section(ticker)
         capex_breakdown = self._query_ollama_capex_breakdown(mda_text)
         
-        net_income = financials.get("net_income", 0)
-        depreciation = financials.get("operating_cash_flow", 0) - net_income if financials.get("operating_cash_flow") and net_income else 0
-        total_capex = abs(financials.get("capex_total", 0)) if financials.get("capex_total") else 0
+        net_income = financials.get("net_income") or 0
+        operating_cash_flow = financials.get("operating_cash_flow") or 0
+        depreciation = operating_cash_flow - net_income if operating_cash_flow and net_income else 0
+        total_capex = abs(financials.get("capex_total") or 0)
         
-        maintenance_pct = capex_breakdown.get("maintenance_percentage", 100) / 100.0
+        maintenance_pct_raw = capex_breakdown.get("maintenance_percentage")
+        if maintenance_pct_raw is None:
+            maintenance_pct_raw = 100
+        maintenance_pct = float(maintenance_pct_raw) / 100.0
         maintenance_capex = total_capex * maintenance_pct
         
         owner_earnings = net_income + depreciation - maintenance_capex
@@ -245,7 +333,7 @@ class KeyFinancialMetrics:
             capex_total = financials.get("capex_total")
 
         if total_revenue is None or net_income is None or operating_cash_flow is None or capex_total is None:
-            raise ValueError("total_revenue, net_income, operating_cash_flow, and capex_total are required")
+            return {"applicable": False, "reason": "Missing required metrics: total_revenue, net_income, operating_cash_flow, and capex_total are required"}
 
         profit_margin = (net_income / total_revenue) if total_revenue else None
         cash_conversion = (operating_cash_flow / net_income) if net_income else None
@@ -274,7 +362,30 @@ class LookthroughEarnings:
     def __init__(self):
         pass
 
-    def evaluate(self, ownership_percentage: float, investee_net_income: float, dividends_received: float) -> dict:
+    def evaluate(
+        self,
+        ownership_percentage: float | None = None,
+        investee_net_income: float | None = None,
+        dividends_received: float | None = None,
+        ticker: str = "",
+    ) -> dict:
+        if ticker and (ownership_percentage is None or investee_net_income is None or dividends_received is None):
+            lookthrough_inputs = self._fetch_lookthrough_inputs(ticker)
+            if not lookthrough_inputs["has_investee_evidence"]:
+                return {
+                    "ticker": ticker,
+                    "applicable": False,
+                    "reason": "No material equity investee evidence found in recent filings.",
+                }
+            if ownership_percentage is None:
+                ownership_percentage = lookthrough_inputs["ownership_percentage"]
+            if investee_net_income is None:
+                investee_net_income = lookthrough_inputs["investee_net_income"]
+            if dividends_received is None:
+                dividends_received = lookthrough_inputs["dividends_received"]
+
+        if ownership_percentage is None or investee_net_income is None or dividends_received is None:
+            return {"applicable": False, "reason": "Missing required metrics: ownership_percentage, investee_net_income, and dividends_received are required"}
         if not 0 <= ownership_percentage <= 1:
             raise ValueError("ownership_percentage must be between 0 and 1")
 
@@ -288,6 +399,17 @@ class LookthroughEarnings:
             "lookthrough_earnings": proportional_earnings,
             "retained_earnings_share": retained_earnings_share
         }
+
+    def _fetch_lookthrough_inputs(self, ticker: str) -> dict:
+        commentary = fetch_lookthrough_commentary(ticker)
+        if not commentary:
+            return {
+                "has_investee_evidence": False,
+                "ownership_percentage": None,
+                "investee_net_income": None,
+                "dividends_received": None,
+            }
+        return _parse_lookthrough_inputs(commentary)
 
     def _helper_method(self):
         """

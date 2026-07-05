@@ -11,13 +11,33 @@ import run
 
 
 class TestRunPipeline(unittest.TestCase):
+    def test_prepare_evaluator_inputs_marks_market_forecasting_forecast_as_missing(self):
+        class MarketForecasting:
+            def evaluate(self, forecast_return=None, actual_return=None, ticker=""):
+                return {
+                    "forecast_return": forecast_return,
+                    "actual_return": actual_return,
+                    "ticker": ticker,
+                }
+
+        evaluator = MarketForecasting()
+        kwargs, missing = run._prepare_evaluator_inputs(evaluator, {"ticker": "YUM", "stock_cagr": 0.12})
+        self.assertEqual(kwargs, {"ticker": "YUM"})
+        self.assertEqual(missing, ["forecast_return"])
+
+    def test_prepare_evaluator_inputs_marks_missing_required_values_for_non_principle_evaluator(self):
+        evaluator = run.valuation_capital.MarginOfSafety()
+        kwargs, missing = run._prepare_evaluator_inputs(evaluator, {"ticker": "YUM"})
+        self.assertEqual(kwargs, {"ticker": "YUM"})
+        self.assertEqual(missing, [])
+
     def test_prepare_evaluator_inputs_marks_missing_required_values(self):
         # We need an evaluator that actually has required arguments without defaults.
-        # MarketForecasting requires actual_return
-        evaluator = run.investment_philosophy.MarketForecasting()
+        evaluator = run.valuation_capital.IntrinsicValueEstimation()
         kwargs, missing = run._prepare_evaluator_inputs(evaluator, {"ticker": "YUM"})
         # "ticker" gets passed in since it's default "", "years" gets passed in from defaults
         self.assertEqual(kwargs, {"ticker": "YUM"})
+        self.assertEqual(missing, [])
 
     def test_prepare_evaluator_inputs_uses_real_context_values(self):
         evaluator = run.valuation_capital.MarginOfSafety()
@@ -91,27 +111,6 @@ class TestRunPipeline(unittest.TestCase):
         self.assertEqual(context["net_debt"], 150.0)
         self.assertEqual(context["debt_to_equity"], 0.8)
         self.assertEqual(context["gross_margin"], 0.42)
-
-    @patch("run.get_all_heuristic_classes")
-    @patch("run._build_real_context")
-    def test_analyze_company_reports_missing_real_inputs(self, mock_build_context, mock_classes):
-        mock_build_context.return_value = {
-            "company_name": "Yum",
-            "description": "SEC description",
-            "commentary": "SEC commentary",
-            # We purposely do NOT pass "ticker" so the pipeline doesn't use fallback fetchers
-        }
-        mock_classes.return_value = {
-            "investment_philosophy": [run.investment_philosophy.FocusInvesting],
-        }
-
-        result = run.analyze_company("YUM")
-
-        self.assertEqual(
-            result["investment_philosophy"]["FocusInvesting"],
-            {"error": "positions must not be empty"},
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

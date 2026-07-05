@@ -1,3 +1,22 @@
+Metadata-Version: 2.4
+Name: buffett-skills
+Version: 0.1.0
+Summary: Warren Buffett-style investment analysis helpers and evaluators
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: flask<4,>=3.0
+Requires-Dist: pandas<3,>=2.2
+Requires-Dist: pandas-datareader<0.11,>=0.10
+Requires-Dist: requests<3,>=2.31
+Requires-Dist: python-dateutil<3,>=2.9
+Requires-Dist: transformers<5,>=4.41
+Requires-Dist: yfinance<0.3,>=0.2.54
+Provides-Extra: dev
+Requires-Dist: pytest<9,>=8.2; extra == "dev"
+Provides-Extra: sec
+Requires-Dist: edgartools<4,>=3.6; extra == "sec"
+Requires-Dist: sec-edgar-downloader<6,>=5; extra == "sec"
+
 > **[中文版本 →](README.zh.md)**
 
 # bft-skills

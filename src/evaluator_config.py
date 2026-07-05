@@ -3,9 +3,28 @@ import json
 import time
 from collections import Counter
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Any
 
 import requests
+
+
+def _load_repo_env() -> None:
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.exists():
+        return
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+_load_repo_env()
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -72,10 +91,10 @@ def _dedupe_preserve_order(values: list[str]) -> list[str]:
 
 
 def _default_ollama_panel(model_override: str | None = None) -> list[str]:
-    panel = ["qwen2.5:7b", "llama3", "gemma4:26b"]
+    panel = ["qwen2.5:7b", "llama3"]
     resolved_override = _resolve_ollama_model(model_override) if model_override else None
     if resolved_override and resolved_override not in panel:
-        panel[0] = resolved_override
+        panel.append(resolved_override)
     return _dedupe_preserve_order(panel)
 
 
@@ -156,7 +175,20 @@ def _aggregate_json_values(values: list[Any]) -> Any:
 
 def aggregate_panel_json(results: list[dict[str, Any]]) -> dict[str, Any]:
     aggregated = _aggregate_json_values(results)
-    return aggregated if isinstance(aggregated, dict) else {}
+    if not isinstance(aggregated, dict):
+        return {}
+
+    aggregated["panel_judgments"] = {
+        result.get("_panel_model", f"judge_{index + 1}"): {
+            key: value for key, value in result.items() if key != "_panel_model"
+        }
+        for index, result in enumerate(results)
+        if result
+    }
+    aggregated["panel_models"] = [
+        result.get("_panel_model") for result in results if result and result.get("_panel_model")
+    ]
+    return aggregated
 
 
 def aggregate_panel_judgment(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -180,6 +212,12 @@ def aggregate_panel_judgment(results: list[dict[str, Any]]) -> dict[str, Any]:
         "confidence": max(0, min(int(confidence), 100)),
         "explanation": explanation,
         "panel_models": [result.get("_panel_model") for result in valid_results if result.get("_panel_model")],
+        "panel_judgments": {
+            result.get("_panel_model", f"judge_{index + 1}"): {
+                key: value for key, value in result.items() if key != "_panel_model"
+            }
+            for index, result in enumerate(valid_results)
+        },
         "panel_vote_split": {
             "inside_circle": inside_votes,
             "outside_circle": len(bool_values) - inside_votes,
@@ -195,6 +233,9 @@ def _call_single_ollama_model(
     timeout: int = 60,
     host: str | None = None,
 ) -> dict[str, Any]:
+    import logging
+    logger = logging.getLogger(__name__)
+    
     base_host = (host or DEFAULT_OLLAMA_HOST).rstrip("/")
     payload: dict[str, Any] = {
         "model": model,
@@ -206,13 +247,19 @@ def _call_single_ollama_model(
     if options:
         payload["options"] = options
 
-    response = requests.post(f"{base_host}/api/generate", json=payload, timeout=timeout)
-    response.raise_for_status()
-    response_json = response.json()
-    return {
-        "model": model,
-        "response": response_json.get("response", ""),
-    }
+    logger.info(f"  -> [Ollama API] Sending request to {base_host}/api/generate with model '{model}'")
+    try:
+        response = requests.post(f"{base_host}/api/generate", json=payload, timeout=timeout)
+        response.raise_for_status()
+        response_json = response.json()
+        logger.info(f"  -> [Ollama API] Received successful response from '{model}'")
+        return {
+            "model": model,
+            "response": response_json.get("response", ""),
+        }
+    except requests.exceptions.RequestException as e:
+        logger.error(f"  -> [Ollama API] Call failed for model '{model}': {e}")
+        raise
 
 
 def call_ollama_panel_json(
@@ -303,3 +350,6 @@ DEFAULT_CIRCLE_OF_COMPETENCE_TEMPERATURE = _get_float_env(
 )
 DEFAULT_INVERSION_TEMPERATURE = _get_float_env("DEFAULT_INVERSION_TEMPERATURE", 0.3)
 RISK_FREE_RATE_FALLBACK = _get_float_env("RISK_FREE_RATE_FALLBACK", 0.042)
+
+EARNINGSCALLS_API_BASE_URL = os.environ.get("EARNINGSCALLS_API_BASE_URL", "https://earningscalls.dev/api/v1").rstrip("/")
+EARNINGSCALLS_API_KEY = os.environ.get("EARNINGSCALLS_API_KEY") or os.environ.get("EARNINGS_CALL_API_KEY", "")

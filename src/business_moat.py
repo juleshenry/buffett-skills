@@ -101,7 +101,15 @@ def fetch_durability_metrics(ticker: str) -> dict:
     except Exception:
         competitor_names = []
 
+    import logging
+    yf_logger = logging.getLogger('yfinance')
+    old_level = yf_logger.level
+    yf_logger.setLevel(logging.CRITICAL)
+
     for competitor in competitor_names[:5]:
+        # Skip obvious non-tickers (spaces, too long)
+        if " " in competitor or len(competitor) > 5:
+            continue
         try:
             competitor_info = yf.Ticker(str(competitor)).info or {}
             revenue_growth = competitor_info.get("revenueGrowth")
@@ -109,6 +117,8 @@ def fetch_durability_metrics(ticker: str) -> dict:
                 competitor_growth_rates.append(float(revenue_growth))
         except Exception:
             continue
+            
+    yf_logger.setLevel(old_level)
 
     market_share_trend = None
     if company_revenue_growth is not None:
@@ -256,9 +266,12 @@ def infer_business_details(ticker: str, model: str = DEFAULT_MODEL) -> dict:
     logger.info(f"Extracting business details for {ticker}...")
 
     try:
+        logger.info(f"  -> Fetching company info for {ticker} (checking SEC filings and yfinance)...")
         company_info = fetch_company_info(ticker)
         company_name = company_info.get("name", ticker)
         business_summary = company_info.get("description", "")
+        source = company_info.get("description_source", "unknown")
+        logger.info(f"  -> Retrieved company info (Source: {source}, Length: {len(business_summary)} chars).")
     except Exception as e:
         logger.error(f"Error fetching ticker info for {ticker}: {e}")
         return {"company_name": ticker, "products": [], "competitors": []}
@@ -279,7 +292,9 @@ def infer_business_details(ticker: str, model: str = DEFAULT_MODEL) -> dict:
     Do not include any markdown or text outside the JSON.
     """
     
+    logger.info(f"  -> Querying Ollama (model={model}) to extract products and competitors...")
     data = _query_ollama_json(prompt, model)
+    logger.info(f"  -> Ollama extraction complete. Extracted {len(data.get('products', []))} products and {len(data.get('competitors', []))} competitors.")
     return {
         "company_name": company_name,
         "business_description": business_summary,
@@ -470,7 +485,7 @@ class BusinessModelTypes:
                     capital_intensity = abs(float(capex_total)) / float(total_revenue)
 
         if recurring_revenue_ratio is None or gross_margin is None or capital_intensity is None:
-            raise ValueError("recurring_revenue_ratio, gross_margin, and capital_intensity are required")
+            return {"applicable": False, "reason": "Missing required metrics: recurring_revenue_ratio, gross_margin, and capital_intensity are required"}
 
         if recurring_revenue_ratio >= BUSINESS_MODEL_RECURRING_REVENUE_MIN:
             model_type = "recurring_revenue"
@@ -515,7 +530,7 @@ class GoodwillEconomicGoodwillVsAccountingGoodwill:
             return_on_tangible_assets = metrics["return_on_tangible_assets"]
 
         if goodwill is None or acquired_earnings is None or return_on_tangible_assets is None:
-            raise ValueError("goodwill, acquired_earnings, and return_on_tangible_assets are required")
+            return {"applicable": False, "reason": "Missing required metrics: goodwill, acquired_earnings, and return_on_tangible_assets are required"}
 
         goodwill_multiple = (goodwill / acquired_earnings) if acquired_earnings > 0 else None
 
@@ -560,7 +575,7 @@ class TheDurabilityOfCompetitiveAdvantage:
             return_on_capital = metrics["return_on_capital"]
 
         if gross_margin_trend is None or market_share_trend is None or return_on_capital is None:
-            raise ValueError("gross_margin_trend, market_share_trend, and return_on_capital are required")
+            return {"applicable": False, "reason": "Missing required metrics: gross_margin_trend, market_share_trend, and return_on_capital are required"}
 
         score = 0
         if gross_margin_trend >= 0:

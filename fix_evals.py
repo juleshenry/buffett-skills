@@ -1,6 +1,6 @@
 import yfinance as yf
-from src.thinking_frameworks import MungersLatticeOfMentalModels, IndependentThinking, OpportunityCostAwareness, PatienceAsEdge
-from src.investment_philosophy import FocusInvesting, MarketForecasting
+from src.thinking_frameworks import IndependentThinking, OpportunityCostAwareness
+from src.investment_philosophy import MarketForecasting
 from src.business_moat import GoodwillEconomicGoodwillVsAccountingGoodwill, TheDurabilityOfCompetitiveAdvantage
 from src.valuation_capital import SpecialInvestmentInstruments
-from src.risk_behavior import WhenToSellClearCriteria, DerivativesRisk, CommonBehavioralBiasesPsychologicalTrapsInInvesting
+from src.risk_behavior import WhenToSellClearCriteria, DerivativesRisk

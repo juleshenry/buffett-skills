@@ -104,6 +104,10 @@ Audit which evaluator implementations rely on hard-coded values, distinguish acc
   - `IntrinsicValueEstimation.evaluate`: default `years=10`.
   - `ShareBuybackAnalysis.evaluate`: hard-coded Ollama URL and model.
 
+
+### Note on "Investor Principles" vs "Company Qualifiers"
+Following an audit, 10 evaluators were identified not as company qualifiers (things to analyze about a stock) but as "Notes to self as an investor" (principles on how to choose, hold, or sell). These were pure math wrappers evaluating investor behavior. They have been permanently removed from the batch analysis pipeline (`src/risk_behavior.py`, `src/investment_philosophy.py`, `src/thinking_frameworks.py`) and refactored into a standalone `principles_bot.py`.
+
 ### Summary of Implementation Status (The "Pure Math Wrapper" Problem)
 
 Beyond simply moving hard-coded values into `evaluator_config.py` and `evaluator_thresholds.py`, a deeper audit reveals a more fundamental issue: **Out of 49 evaluators, ~38 are currently just "pure math wrappers" or stubs**. 
@@ -131,7 +135,6 @@ Only about **7 evaluators** (such as `LeverageRisk` and `MrMarket`) are implemen
   - `ValueTraps`: `pe_ratio <= 12`, `debt_to_equity > 1.0`, `return_on_capital < 0.08`, `len(flags) >= 3`.
   - `TheImpactOfInflation`: inflation spike `> 3.0`, resilient margin change `>= -0.01`.
   - `DerivativesRisk`: exposure `> 3`, `> 1`; level 3 assets `> 0.15`, `> 0.05`.
-  - `CommonBehavioralBiasesPsychologicalTrapsInInvesting`: holding period `< 1`, high risk if `len(flags) >= 2`.
 
 - `src/business_moat.py`
   - `BusinessModelTypes`: `0.7`, `0.25`, `0.10`, `0.50`.
@@ -151,9 +154,7 @@ Only about **7 evaluators** (such as `LeverageRisk` and `MrMarket`) are implemen
 - `src/thinking_frameworks.py`
   - `MrMarket`: fear at `-0.20` drawdown and `-0.10` vs 200d MA, greed at `-0.05` and `+0.10`, annualization constant `252`.
   - `LongtermOrientation`: `years >= 5`, `excess_return > 0.02`, `years >= 3`.
-  - `MungersLatticeOfMentalModels`: `0.75`, `0.5`.
   - `IndependentThinking`: `evidence_strength >= 0.7`, `abs(valuation_gap) >= 0.15`.
-  - `PatienceAsEdge`: holding period `>= 3`, turnover `<= 0.25`.
 
 - `src/valuation_capital.py`
   - `TheRelationshipBetweenPurchasePriceAndIntrinsicValue`: `margin >= 0.25`, `>= 0.10`, `< 0`.
@@ -166,7 +167,6 @@ Only about **7 evaluators** (such as `LeverageRisk` and `MrMarket`) are implemen
   - `CorporateGovernanceAndShareholderOrientation`: `insider_ownership >= 0.05`, strong if score `>= 3`.
 
 - `src/investment_philosophy.py`
-  - `FocusInvesting`: top three weight `>= 0.50`.
   - `EfficientMarketTheory`: `abs(excess_return) <= 0.02`, `tracking_error <= 0.05`.
   - `MarketForecasting`: useful if `abs(forecast_error) <= 0.05`.
 

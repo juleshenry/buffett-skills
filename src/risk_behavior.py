@@ -5,8 +5,6 @@ from typing import Dict, Any, Optional
 import yfinance as yf
 from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL, call_ollama_panel_json
 from evaluator_thresholds import (
-    BEHAVIORAL_HIGH_RISK_FLAG_COUNT_MIN,
-    BEHAVIORAL_HOLDING_PERIOD_MIN_YEARS,
     DERIVATIVES_EXPOSURE_HIGH_MIN,
     DERIVATIVES_EXPOSURE_MODERATE_MIN,
     INFLATION_MARGIN_CHANGE_FLOOR,
@@ -174,49 +172,6 @@ if __name__ == "__main__":
     main()
 
 
-class WhenToSellClearCriteria:
-    """
-    Heuristic: When to Sell (Clear Criteria)
-    """
-    def __init__(self):
-        pass
-
-    def evaluate(
-        self,
-        thesis_broken: bool | None = None,
-        better_opportunity_available: bool | None = None,
-        extreme_overvaluation: bool | None = None,
-        balance_sheet_deterioration: bool | None = None,
-        ticker: str = ""
-    ) -> dict:
-        if ticker and any(v is None for v in (thesis_broken, better_opportunity_available, extreme_overvaluation, balance_sheet_deterioration)):
-            thesis_broken = thesis_broken if thesis_broken is not None else False
-            better_opportunity_available = better_opportunity_available if better_opportunity_available is not None else False
-            extreme_overvaluation = extreme_overvaluation if extreme_overvaluation is not None else False
-            balance_sheet_deterioration = balance_sheet_deterioration if balance_sheet_deterioration is not None else False
-
-        reasons = []
-        if thesis_broken:
-            reasons.append("thesis_broken")
-        if better_opportunity_available:
-            reasons.append("better_opportunity_available")
-        if extreme_overvaluation:
-            reasons.append("extreme_overvaluation")
-        if balance_sheet_deterioration:
-            reasons.append("balance_sheet_deterioration")
-
-        return {
-            "sell": bool(reasons),
-            "reasons": reasons,
-            "primary_reason": reasons[0] if reasons else None
-        }
-
-    def _helper_method(self):
-        """
-        Example helper method. All internal logic should be _ prefixed.
-        """
-        pass
-
 class ValueTraps:
     """
     Heuristic: Value Traps
@@ -242,7 +197,7 @@ class ValueTraps:
             return_on_capital = metrics["return_on_capital"]
 
         if any(value is None for value in (pe_ratio, revenue_growth, free_cash_flow_growth, debt_to_equity, return_on_capital)):
-            raise ValueError("pe_ratio, revenue_growth, free_cash_flow_growth, debt_to_equity, and return_on_capital are required")
+            return {"applicable": False, "reason": "Missing required metrics: pe_ratio, revenue_growth, free_cash_flow_growth, debt_to_equity, and return_on_capital are required"}
 
         flags = []
 
@@ -310,7 +265,7 @@ class TheImpactOfInflation:
                 inflation_df = fetch_cpi_inflation_data(int(margins_df["Year"].min()), int(margins_df["Year"].max()))
 
         if margins_df is None or inflation_df is None:
-            raise ValueError("margins_df and inflation_df are required")
+            return {"applicable": False, "reason": "Missing required metrics: margins_df and inflation_df are required"}
 
         if margins_df.empty or inflation_df.empty:
             return pd.DataFrame()
@@ -380,7 +335,7 @@ class DerivativesRisk:
                 }
 
         if notional_exposure is None or equity_capital is None or level_3_assets_ratio is None:
-            raise ValueError("notional_exposure, equity_capital, and level_3_assets_ratio are required")
+            return {"applicable": False, "reason": "Missing required metrics: notional_exposure, equity_capital, and level_3_assets_ratio are required"}
 
         exposure_ratio = (notional_exposure / equity_capital) if equity_capital > 0 else None
 
@@ -396,42 +351,6 @@ class DerivativesRisk:
             "exposure_ratio": exposure_ratio,
             "level_3_assets_ratio": level_3_assets_ratio,
             "derivatives_risk": risk
-        }
-
-    def _helper_method(self):
-        """
-        Example helper method. All internal logic should be _ prefixed.
-        """
-        pass
-
-class CommonBehavioralBiasesPsychologicalTrapsInInvesting:
-    """
-    Heuristic: Common Behavioral Biases (Psychological Traps in Investing)
-    """
-    def __init__(self):
-        pass
-
-    def evaluate(self, thesis_changes_after_price_move: bool | None = None, avg_holding_period_years: float | None = None, adds_to_losers_without_new_evidence: bool | None = None, ticker: str = "") -> dict:
-        if ticker and (thesis_changes_after_price_move is None or avg_holding_period_years is None or adds_to_losers_without_new_evidence is None):
-            thesis_changes_after_price_move = thesis_changes_after_price_move if thesis_changes_after_price_move is not None else False
-            avg_holding_period_years = avg_holding_period_years if avg_holding_period_years is not None else 5.0
-            adds_to_losers_without_new_evidence = adds_to_losers_without_new_evidence if adds_to_losers_without_new_evidence is not None else False
-
-        if thesis_changes_after_price_move is None or avg_holding_period_years is None or adds_to_losers_without_new_evidence is None:
-            raise ValueError("All metrics must be provided")
-
-        flags = []
-        if thesis_changes_after_price_move:
-            flags.append("recency_bias")
-        if avg_holding_period_years < BEHAVIORAL_HOLDING_PERIOD_MIN_YEARS:
-            flags.append("impatience")
-        if adds_to_losers_without_new_evidence:
-            flags.append("commitment_bias")
-
-        return {
-            "bias_flags": flags,
-            "bias_count": len(flags),
-            "behavioral_risk": "high" if len(flags) >= BEHAVIORAL_HIGH_RISK_FLAG_COUNT_MIN else "moderate" if len(flags) == 1 else "low"
         }
 
     def _helper_method(self):

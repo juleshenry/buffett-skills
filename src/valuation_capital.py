@@ -1,4 +1,5 @@
 import json
+import re
 import requests
 import yfinance as yf
 from typing import Dict, Any, List, Optional
@@ -144,6 +145,114 @@ def fetch_management_commentary(ticker_symbol: str) -> str:
         )
     except Exception:
         return "No SEC management commentary available."
+
+
+def fetch_special_instrument_commentary(ticker_symbol: str) -> str:
+    keyword_sets = (
+        (
+            "8-K",
+            (
+                "convertible notes",
+                "convertible preferred",
+                "preferred stock",
+                "warrant",
+                "financing",
+                "collateral",
+                "secured",
+            ),
+        ),
+        (
+            "10-Q",
+            (
+                "convertible notes",
+                "convertible preferred",
+                "preferred stock",
+                "warrant",
+                "collateral",
+                "secured debt",
+            ),
+        ),
+        (
+            "10-K",
+            (
+                "convertible notes",
+                "convertible preferred",
+                "preferred stock",
+                "warrant",
+                "collateral",
+                "secured debt",
+            ),
+        ),
+    )
+
+    for form, keywords in keyword_sets:
+        try:
+            commentary = fetch_filing_keyword_context(
+                ticker_symbol,
+                form=form,
+                keywords=keywords,
+                context_chars=1800,
+                max_matches=4,
+                max_chars=12000,
+            )
+            if commentary:
+                return commentary
+        except Exception:
+            continue
+
+    return ""
+
+
+def _parse_percentage_value(text: str, patterns: list[str]) -> Optional[float]:
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return float(match.group(1)) / 100.0
+    return None
+
+
+def _parse_special_instrument_metrics(commentary: str) -> dict[str, Any]:
+    normalized = commentary.lower()
+    has_special_instrument = any(
+        token in normalized
+        for token in (
+            "convertible note",
+            "convertible notes",
+            "convertible preferred",
+            "preferred stock",
+            "warrant",
+        )
+    )
+
+    coupon_rate = _parse_percentage_value(
+        commentary,
+        [
+            r"coupon\s+rate[^\d]{0,20}(\d+(?:\.\d+)?)\s*%",
+            r"interest\s+rate[^\d]{0,20}(\d+(?:\.\d+)?)\s*%",
+            r"bearing\s+interest\s+at\s+(\d+(?:\.\d+)?)\s*%",
+            r"dividend\s+rate[^\d]{0,20}(\d+(?:\.\d+)?)\s*%",
+        ],
+    )
+    conversion_discount = _parse_percentage_value(
+        commentary,
+        [
+            r"conversion\s+discount[^\d]{0,20}(\d+(?:\.\d+)?)\s*%",
+            r"discount\s+to\s+(?:the\s+)?conversion\s+price[^\d]{0,20}(\d+(?:\.\d+)?)\s*%",
+        ],
+    )
+
+    collateral_coverage = None
+    if re.search(r"\b(secured|collateral|first lien|asset-backed)\b", commentary, flags=re.IGNORECASE):
+        collateral_coverage = 1.0
+    elif has_special_instrument:
+        collateral_coverage = 0.0
+
+    return {
+        "has_special_instrument": has_special_instrument,
+        "coupon_rate": coupon_rate,
+        "conversion_discount": conversion_discount,
+        "collateral_coverage": collateral_coverage,
+    }
 
 
 # --- DCF VALUATION ---
@@ -317,7 +426,7 @@ class IntrinsicValueEstimation:
             current_market_price = fetch_current_market_price(ticker)
 
         if any(value is None for value in (fcf, growth_rate, discount_rate, shares_outstanding, net_debt)):
-            raise ValueError("fcf, growth_rate, discount_rate, shares_outstanding, and net_debt are required")
+            return {"applicable": False, "reason": "Missing required metrics: fcf, growth_rate, discount_rate, shares_outstanding, and net_debt are required"}
 
         projected_fcfs = []
         current_fcf = fcf
@@ -372,7 +481,7 @@ class MarginOfSafety:
             market_price = intrinsic_result.get("market_price") or fetch_current_market_price(ticker)
 
         if intrinsic_value is None or market_price is None:
-            raise ValueError("intrinsic_value and market_price are required")
+            return {"applicable": False, "reason": "Missing required metrics: intrinsic_value and market_price are required"}
 
         if intrinsic_value <= 0:
             raise ValueError("intrinsic_value must be positive")
@@ -410,7 +519,7 @@ class TheRelationshipBetweenPurchasePriceAndIntrinsicValue:
             market_price = mos["market_price"]
 
         if intrinsic_value is None or market_price is None:
-            raise ValueError("intrinsic_value and market_price are required")
+            return {"applicable": False, "reason": "Missing required metrics: intrinsic_value and market_price are required"}
 
         margin = MarginOfSafety().evaluate(intrinsic_value, market_price)["margin_of_safety"]
 
@@ -457,7 +566,7 @@ class CapitalAllocationAnalysis:
             cash_and_equivalents = float(financials["cash_and_equivalents"])
 
         if recent_free_cash_flow is None or total_debt is None or cash_and_equivalents is None:
-            raise ValueError("recent_free_cash_flow, total_debt, and cash_and_equivalents are required")
+            return {"applicable": False, "reason": "Missing required metrics: recent_free_cash_flow, total_debt, and cash_and_equivalents are required"}
 
         net_cash = cash_and_equivalents - total_debt
         balance_sheet = "net_cash" if net_cash >= 0 else "net_debt"
@@ -584,9 +693,19 @@ class SpecialInvestmentInstruments:
 
     def evaluate(self, coupon_rate: float | None = None, conversion_discount: float | None = None, collateral_coverage: float | None = None, ticker: str = "") -> dict:
         if ticker and (coupon_rate is None or conversion_discount is None or collateral_coverage is None):
-            coupon_rate = coupon_rate if coupon_rate is not None else 0.05
-            conversion_discount = conversion_discount if conversion_discount is not None else 0.0
-            collateral_coverage = collateral_coverage if collateral_coverage is not None else 1.0
+            instrument_metrics = self._fetch_special_instrument_metrics(ticker)
+            if not instrument_metrics["has_special_instrument"]:
+                return {
+                    "ticker": ticker,
+                    "applicable": False,
+                    "reason": "No special investment instrument evidence found in recent filings.",
+                }
+            if coupon_rate is None:
+                coupon_rate = instrument_metrics["coupon_rate"]
+            if conversion_discount is None:
+                conversion_discount = instrument_metrics["conversion_discount"]
+            if collateral_coverage is None:
+                collateral_coverage = instrument_metrics["collateral_coverage"]
             
         if coupon_rate is None or conversion_discount is None or collateral_coverage is None:
             raise ValueError("All metrics must be provided")
@@ -612,6 +731,17 @@ class SpecialInvestmentInstruments:
             "instrument_score": score,
             "instrument_attractiveness": attractiveness
         }
+
+    def _fetch_special_instrument_metrics(self, ticker: str) -> dict[str, Any]:
+        commentary = fetch_special_instrument_commentary(ticker)
+        if not commentary:
+            return {
+                "has_special_instrument": False,
+                "coupon_rate": None,
+                "conversion_discount": None,
+                "collateral_coverage": None,
+            }
+        return _parse_special_instrument_metrics(commentary)
 
     def _helper_method(self):
         """

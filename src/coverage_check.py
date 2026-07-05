@@ -26,7 +26,6 @@ PUBLIC_MARKET_CALLS = {
     "yf.download",
 }
 
-
 def get_evaluate_method(class_node):
     for node in class_node.body:
         if isinstance(node, ast.FunctionDef) and node.name == "evaluate":
@@ -35,9 +34,9 @@ def get_evaluate_method(class_node):
 
 
 def raises_not_implemented(function_node):
-    for expr in function_node.body:
-        if isinstance(expr, ast.Raise):
-            if isinstance(expr.exc, ast.Call) and getattr(expr.exc.func, "id", "") == "NotImplementedError":
+    for node in ast.walk(function_node):
+        if isinstance(node, ast.Raise):
+            if isinstance(node.exc, ast.Call) and getattr(node.exc.func, "id", "") == "NotImplementedError":
                 return True
     return False
 
