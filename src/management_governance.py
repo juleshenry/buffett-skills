@@ -230,28 +230,37 @@ class CorporateCulture:
                 employee_turnover = culture_inputs["employee_turnover"]
             if restructurings_per_5y is None:
                 restructurings_per_5y = culture_inputs["restructurings_per_5y"]
-            
-        if employee_turnover is None or insider_ownership is None or restructurings_per_5y is None:
-            return {"applicable": False, "reason": "Missing required metrics: All metrics must be provided or fetchable via ticker"}
 
-        score = 0
-        if employee_turnover <= CULTURE_EMPLOYEE_TURNOVER_MAX:
-            score += 1
-        if insider_ownership >= CULTURE_INSIDER_OWNERSHIP_MIN:
-            score += 1
-        if restructurings_per_5y <= CULTURE_RESTRUCTURINGS_MAX:
-            score += 1
+        signal_results = {}
+        if employee_turnover is not None:
+            signal_results["employee_turnover"] = employee_turnover <= CULTURE_EMPLOYEE_TURNOVER_MAX
+        if insider_ownership is not None:
+            signal_results["insider_ownership"] = insider_ownership >= CULTURE_INSIDER_OWNERSHIP_MIN
+        if restructurings_per_5y is not None:
+            signal_results["restructurings_per_5y"] = restructurings_per_5y <= CULTURE_RESTRUCTURINGS_MAX
+
+        # Require at least ONE signal instead of two, since explicit culture metrics are rare in 10Ks
+        if len(signal_results) < 1:
+            return {
+                "ticker": ticker,
+                "applicable": False,
+                "reason": "Insufficient explicit culture evidence found; need at least one culture proxy (e.g. insider ownership).",
+            }
+
+        positive_signals = sum(1 for passed in signal_results.values() if passed)
+        score = round((positive_signals / len(signal_results)) * 3, 2)
 
         culture = "weak"
-        if score == 3:
+        if positive_signals == len(signal_results):
             culture = "strong"
-        elif score == 2:
+        elif positive_signals / len(signal_results) >= 0.5:
             culture = "stable"
 
         return {
             "employee_turnover": employee_turnover,
             "insider_ownership": insider_ownership,
             "restructurings_per_5y": restructurings_per_5y,
+            "signals_available": len(signal_results),
             "culture_score": score,
             "culture_assessment": culture
         }
@@ -264,18 +273,31 @@ class CorporateCulture:
 
     def _fetch_culture_inputs(self, ticker: str) -> dict:
         info = yf.Ticker(ticker).info or {}
-        commentary = self._fetch_culture_commentary(ticker)
+        employee_commentary = self._fetch_employee_commentary(ticker)
+        restructuring_commentary = self._fetch_restructuring_commentary(ticker)
         return {
-            "insider_ownership": float(info.get("heldPercentInsiders") or 0.0),
-            "employee_turnover": self._estimate_employee_turnover(commentary),
-            "restructurings_per_5y": self._count_restructuring_signals(commentary),
+            "insider_ownership": float(info.get("heldPercentInsiders")) if info.get("heldPercentInsiders") is not None else None,
+            "employee_turnover": self._estimate_employee_turnover(employee_commentary),
+            "restructurings_per_5y": self._count_restructuring_signals(restructuring_commentary),
         }
 
-    def _fetch_culture_commentary(self, ticker: str) -> str:
+    def _fetch_employee_commentary(self, ticker: str) -> str:
+        try:
+            return fetch_filing_section(
+                ticker,
+                form="10-K",
+                start_markers=("item 1.", "business", "human capital", "employees"),
+                end_markers=("item 1a.", "risk factors"),
+                max_chars=16000,
+            )
+        except Exception:
+            return ""
+
+    def _fetch_restructuring_commentary(self, ticker: str) -> str:
         keyword_sets = (
-            ("10-K", ("employees", "employee retention", "turnover", "restructuring", "workforce reduction", "layoff")),
-            ("10-Q", ("restructuring", "workforce reduction", "layoff", "retention")),
-            ("8-K", ("restructuring", "workforce reduction", "layoff")),
+            ("10-K", ("restructuring", "workforce reduction", "layoff", "reorganization", "severance")),
+            ("10-Q", ("restructuring", "workforce reduction", "layoff", "reorganization", "severance")),
+            ("8-K", ("restructuring", "workforce reduction", "layoff", "reorganization", "severance")),
         )
 
         for form, keywords in keyword_sets:
@@ -295,23 +317,49 @@ class CorporateCulture:
 
         return ""
 
-    def _estimate_employee_turnover(self, commentary: str) -> float:
+    def _estimate_employee_turnover(self, commentary: str) -> float | None:
+        if not commentary:
+            return None
         text = commentary.lower()
         percent_match = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:employee\s+)?turnover", text)
         if percent_match:
             return float(percent_match.group(1)) / 100.0
-
-        if any(term in text for term in ("high turnover", "elevated attrition", "retention challenges")):
-            return 0.20
-        if any(term in text for term in ("low turnover", "strong retention", "retention remained strong")):
-            return 0.10
-        return 0.15
+            
+        try:
+            from evaluator_config import call_ollama_panel_json, DEFAULT_OLLAMA_MODEL
+            prompt = f"Estimate the employee turnover rate (0.0 to 1.0) based on this text. If it is generally low/good, you can estimate 0.10. If high/bad, estimate 0.30. If not mentioned, return null. Return ONLY JSON: {{\"turnover_rate\": float or null}}. Text: {commentary[:3000]}"
+            res = call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL)
+            return res.get("turnover_rate")
+        except Exception:
+            return None
 
     def _count_restructuring_signals(self, commentary: str) -> int:
-        text = commentary.lower()
-        keywords = ("restructuring", "workforce reduction", "layoff", "reorganization", "severance")
-        matches = sum(text.count(keyword) for keyword in keywords)
-        return min(matches, 5)
+        text = (commentary or "").lower()
+        if not text.strip():
+            return None
+
+        xbrl_noise_markers = (
+            "us-gaap:",
+            "member",
+            "2025-12-31",
+            "2024-12-31",
+            "2023-12-31",
+        )
+        if sum(marker in text for marker in xbrl_noise_markers) >= 2:
+            return None
+
+        explicit_patterns = (
+            r"restructuring\s+plan",
+            r"restructuring\s+charge",
+            r"announced\s+(?:a\s+)?restructuring",
+            r"workforce\s+reduction",
+            r"laid\s+off",
+            r"layoffs",
+            r"severance\s+costs",
+            r"reorganization\s+plan",
+        )
+        matches = sum(len(re.findall(pattern, text)) for pattern in explicit_patterns)
+        return min(matches, 5) if matches > 0 else None
 
 class AcquisitionLogicAcquisitionCriteria:
     """
@@ -321,17 +369,31 @@ class AcquisitionLogicAcquisitionCriteria:
         pass
 
     def evaluate(self, purchase_multiple: float | None = None, return_on_invested_capital: float | None = None, debt_funded: bool | None = None, ticker: str = "") -> dict:
+        fetched_inputs = None
         if ticker and (purchase_multiple is None or return_on_invested_capital is None or debt_funded is None):
             acquisition_inputs = self._fetch_acquisition_inputs(ticker)
+            fetched_inputs = acquisition_inputs
             if purchase_multiple is None:
                 purchase_multiple = acquisition_inputs["purchase_multiple"]
             if return_on_invested_capital is None:
                 return_on_invested_capital = acquisition_inputs["return_on_invested_capital"]
             if debt_funded is None:
                 debt_funded = acquisition_inputs["debt_funded"]
-            
-        if purchase_multiple is None or return_on_invested_capital is None or debt_funded is None:
-            return {"applicable": False, "reason": "Missing required metrics: All metrics must be provided or fetchable via ticker"}
+
+        if fetched_inputs and not fetched_inputs.get("has_acquisition_evidence"):
+            return {
+                "ticker": ticker,
+                "applicable": False,
+                "reason": "No recent acquisition evidence found in SEC filings.",
+            }
+             
+        # Instead of failing on missing exact figures, default them conservatively so the qualitative boolean (debt_funded) can still carry weight
+        if purchase_multiple is None:
+            purchase_multiple = 15.0 # Neutral penalty
+        if return_on_invested_capital is None:
+            return_on_invested_capital = 0.05 # Low neutral return
+        if debt_funded is None:
+            debt_funded = True # Assume debt if unknown to be conservative
 
         score = 0
         if purchase_multiple <= ACQUISITION_PURCHASE_MULTIPLE_MAX:
@@ -363,11 +425,41 @@ class AcquisitionLogicAcquisitionCriteria:
 
     def _fetch_acquisition_inputs(self, ticker: str) -> dict:
         commentary = self._fetch_acquisition_commentary(ticker)
+        purchase_multiple = self._parse_purchase_multiple(commentary)
+        debt_funded = self._parse_debt_funding(commentary)
+        has_acquisition_evidence = self._has_material_acquisition_evidence(
+            commentary,
+            purchase_multiple=purchase_multiple,
+            debt_funded=debt_funded,
+        )
         return {
-            "purchase_multiple": self._parse_purchase_multiple(commentary),
+            "has_acquisition_evidence": has_acquisition_evidence,
+            "purchase_multiple": purchase_multiple,
             "return_on_invested_capital": self._fetch_return_on_invested_capital(ticker),
-            "debt_funded": self._parse_debt_funding(commentary),
+            "debt_funded": debt_funded,
         }
+
+    def _has_material_acquisition_evidence(
+        self,
+        commentary: str,
+        purchase_multiple: float | None = None,
+        debt_funded: bool = False,
+    ) -> bool:
+        text = (commentary or "").lower()
+        if not text.strip():
+            return False
+
+        if purchase_multiple is not None or debt_funded:
+            return True
+
+        explicit_deal_markers = (
+            "merger agreement",
+            "business combination",
+            "purchase price of",
+            "acquisition closed",
+            "definitive agreement",
+        )
+        return any(marker in text for marker in explicit_deal_markers)
 
     def _fetch_acquisition_commentary(self, ticker: str) -> str:
         keyword_sets = (
@@ -398,18 +490,14 @@ class AcquisitionLogicAcquisitionCriteria:
         match = re.search(r"(\d+(?:\.\d+)?)\s*x\s*(?:ebitda|earnings)", text)
         if match:
             return float(match.group(1))
-
-        if "disciplined acquisition" in text or "value creation" in text:
-            return float(ACQUISITION_PURCHASE_MULTIPLE_MAX)
-
-        return float(ACQUISITION_PURCHASE_MULTIPLE_MAX + 2)
+        return None
 
     def _parse_debt_funding(self, commentary: str) -> bool:
         text = commentary.lower()
         debt_terms = ("debt financing", "term loan", "bridge facility", "notes offering", "borrowings")
         return any(term in text for term in debt_terms)
 
-    def _fetch_return_on_invested_capital(self, ticker: str) -> float:
+    def _fetch_return_on_invested_capital(self, ticker: str) -> float | None:
         stock = yf.Ticker(ticker)
         income_stmt = stock.income_stmt
         balance_sheet = stock.balance_sheet
@@ -419,11 +507,11 @@ class AcquisitionLogicAcquisitionCriteria:
         cash = _get_statement_value(balance_sheet, ("Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments", "Cash And Short Term Investments"), 0)
 
         if None in (earnings, total_debt, equity):
-            return 0.0
+            return None
 
         invested_capital = total_debt + equity - (cash or 0.0)
         if invested_capital <= 0:
-            return 0.0
+            return None
 
         return float(earnings / invested_capital)
 

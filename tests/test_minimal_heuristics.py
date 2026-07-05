@@ -8,7 +8,7 @@ import pandas as pd
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 from financial_metrics import KeyFinancialMetrics
-from financial_metrics import LookthroughEarnings
+from financial_metrics import LookthroughEarningsPrinciple
 from business_moat import BusinessModelTypes, TheDurabilityOfCompetitiveAdvantage
 from business_moat import GoodwillEconomicGoodwillVsAccountingGoodwill
 from investment_philosophy import IntrinsicValue, UndervaluedMarginOfSafety
@@ -35,6 +35,7 @@ import thinking_frameworks
 import valuation_capital
 from management_governance import ManagementEvaluation
 from risk_behavior import LeverageRisk
+from risk_behavior import normalize_footnote_analysis
 from valuation_capital import normalize_buyback_analysis
 from principles_bot import (
     CommonBehavioralBiasesPrinciple,
@@ -68,6 +69,39 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["panel_vote_split"]["inside_circle"], 2)
         self.assertIn("qwen2.5:7b", result["panel_judgments"])
         self.assertEqual(result["panel_judgments"]["llama3"]["confidence"], 70)
+
+    def test_normalize_footnote_analysis_merges_partial_panel_outputs(self):
+        result = normalize_footnote_analysis(
+            {
+                "_panel_model": "qwen2.5:7b",
+                "panel_judgments": {
+                    "qwen2.5:7b": {},
+                    "llama3": {
+                        "operating_lease_obligations": None,
+                        "pension_underfunding": None,
+                    },
+                },
+                "panel_models": ["qwen2.5:7b", "llama3"],
+            }
+        )
+
+        self.assertEqual(result["operating_lease_obligations"], "Not found")
+        self.assertEqual(result["pension_underfunding"], "Not found")
+        self.assertEqual(result["toxic_derivative_exposure"], "None mentioned")
+        self.assertEqual(result["panel_judgments"]["qwen2.5:7b"]["operating_lease_obligations"], "Not found")
+
+    def test_normalize_footnote_analysis_accepts_legacy_field_names(self):
+        result = normalize_footnote_analysis(
+            {
+                "total_operating_lease_obligations": 50000000,
+                "pension_plan_underfunding_amount": 0,
+                "toxic_derivative_exposure": "None",
+            }
+        )
+
+        self.assertEqual(result["operating_lease_obligations"], 50000000)
+        self.assertEqual(result["pension_underfunding"], 0)
+        self.assertEqual(result["toxic_derivative_exposure"], "None")
 
     @patch("thinking_frameworks.fetch_filing_section")
     @patch("thinking_frameworks.call_ollama_panel_json")
@@ -245,7 +279,7 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["buyback_analysis"]["buyback_strategy"], "Systematic")
 
     def test_lookthrough_earnings(self):
-        result = LookthroughEarnings().evaluate(
+        result = LookthroughEarningsPrinciple().evaluate(
             ownership_percentage=0.25,
             investee_net_income=200.0,
             dividends_received=20.0,
@@ -260,7 +294,7 @@ class TestMinimalHeuristics(unittest.TestCase):
             "Equity in earnings was $200 million. Dividends received totaled $20 million."
         )
 
-        result = LookthroughEarnings().evaluate(ticker="AAPL")
+        result = LookthroughEarningsPrinciple().evaluate(ticker="AAPL")
 
         self.assertAlmostEqual(result["ownership_percentage"], 0.25)
         self.assertAlmostEqual(result["investee_net_income"], 200_000_000.0)
@@ -272,10 +306,19 @@ class TestMinimalHeuristics(unittest.TestCase):
     def test_lookthrough_earnings_returns_not_applicable_when_no_investee_evidence_found(self, mock_fetch_commentary):
         mock_fetch_commentary.return_value = ""
 
-        result = LookthroughEarnings().evaluate(ticker="AAPL")
+        result = LookthroughEarningsPrinciple().evaluate(ticker="AAPL")
 
         self.assertFalse(result["applicable"])
         self.assertIn("No material equity investee evidence", result["reason"])
+
+    @patch("financial_metrics.fetch_lookthrough_commentary")
+    def test_lookthrough_earnings_returns_not_applicable_when_metrics_cannot_be_extracted(self, mock_fetch_commentary):
+        mock_fetch_commentary.return_value = "The company discusses equity method investments, but does not quantify ownership, earnings, or dividends received."
+
+        result = LookthroughEarningsPrinciple().evaluate(ticker="AAPL")
+
+        self.assertFalse(result["applicable"])
+        self.assertIn("could not be extracted reliably", result["reason"])
 
     def test_business_model_type(self):
         result = BusinessModelTypes().evaluate(
@@ -287,16 +330,13 @@ class TestMinimalHeuristics(unittest.TestCase):
 
     @patch("business_moat.fetch_deep_financials")
     @patch("business_moat.fetch_historical_margins")
-    @patch("business_moat.fetch_company_info")
-    def test_business_model_type_fetches_real_company_data(self, mock_company_info, mock_margins, mock_financials):
-        mock_company_info.return_value = {
-            "description": "The company sells software as a service subscriptions with recurring renewals."
-        }
+    def test_business_model_type_returns_not_applicable_without_explicit_recurring_revenue_ratio(self, mock_margins, mock_financials):
         mock_margins.return_value = pd.DataFrame([{"Year": 2024, "Gross_Margin": 0.7}])
         mock_financials.return_value = {"total_revenue": 1000.0, "capex_total": -50.0}
 
         result = BusinessModelTypes().evaluate(ticker="AAPL")
-        self.assertEqual(result["business_model_type"], "recurring_revenue")
+        self.assertFalse(result["applicable"])
+        self.assertIn("recurring_revenue_ratio", result["reason"])
 
     def test_durability_of_competitive_advantage(self):
         result = TheDurabilityOfCompetitiveAdvantage().evaluate(
@@ -626,19 +666,32 @@ class TestMinimalHeuristics(unittest.TestCase):
 
     @patch("management_governance.yf.Ticker")
     @patch("management_governance.fetch_filing_keyword_context")
-    def test_corporate_culture_fetches_real_inputs_for_ticker(self, mock_fetch_context, mock_ticker):
+    @patch("management_governance.fetch_filing_section")
+    def test_corporate_culture_fetches_real_inputs_for_ticker(self, mock_fetch_section, mock_fetch_context, mock_ticker):
         mock_ticker.return_value.info = {"heldPercentInsiders": 0.06}
-        mock_fetch_context.return_value = (
-            "Employee turnover remained 10%. Retention remained strong. "
-            "The company announced a restructuring and a reorganization program."
-        )
+        mock_fetch_section.return_value = "10% employee turnover was reported. Retention remained strong."
+        mock_fetch_context.return_value = "The company announced a restructuring and a reorganization program."
 
         result = CorporateCulture().evaluate(ticker="AAPL")
 
         self.assertEqual(result["insider_ownership"], 0.06)
         self.assertEqual(result["employee_turnover"], 0.10)
         self.assertEqual(result["restructurings_per_5y"], 2)
+        self.assertEqual(result["signals_available"], 3)
         self.assertEqual(result["culture_assessment"], "stable")
+
+    @patch("management_governance.yf.Ticker")
+    @patch("management_governance.fetch_filing_keyword_context")
+    @patch("management_governance.fetch_filing_section")
+    def test_corporate_culture_returns_not_applicable_without_enough_signals(self, mock_fetch_section, mock_fetch_context, mock_ticker):
+        mock_ticker.return_value.info = {"heldPercentInsiders": 0.06}
+        mock_fetch_section.return_value = "The company discussed employees and retention qualitatively."
+        mock_fetch_context.return_value = ""
+
+        result = CorporateCulture().evaluate(ticker="AAPL")
+
+        self.assertFalse(result["applicable"])
+        self.assertIn("need at least two", result["reason"])
 
     def test_acquisition_logic(self):
         result = AcquisitionLogicAcquisitionCriteria().evaluate(
@@ -673,6 +726,29 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertAlmostEqual(result["return_on_invested_capital"], 140.0 / 900.0)
         self.assertFalse(result["debt_funded"])
         self.assertEqual(result["acquisition_discipline"], "disciplined")
+
+    @patch("management_governance.yf.Ticker")
+    @patch("management_governance.fetch_filing_keyword_context")
+    def test_acquisition_logic_returns_not_applicable_without_purchase_multiple(self, mock_fetch_context, mock_ticker):
+        mock_fetch_context.return_value = "Management discussed an acquisition and financing structure without disclosing a purchase multiple."
+
+        income_stmt = pd.DataFrame({
+            pd.Timestamp("2024-12-31"): {"Operating Income": 140.0}
+        })
+        balance_sheet = pd.DataFrame({
+            pd.Timestamp("2024-12-31"): {
+                "Total Debt": 200.0,
+                "Stockholders Equity": 800.0,
+                "Cash And Cash Equivalents": 100.0,
+            }
+        })
+        mock_ticker.return_value.income_stmt = income_stmt
+        mock_ticker.return_value.balance_sheet = balance_sheet
+
+        result = AcquisitionLogicAcquisitionCriteria().evaluate(ticker="AAPL")
+
+        self.assertFalse(result["applicable"])
+        self.assertIn("All metrics must be provided or fetchable", result["reason"])
 
     def test_special_investment_instruments(self):
         result = SpecialInvestmentInstruments().evaluate(

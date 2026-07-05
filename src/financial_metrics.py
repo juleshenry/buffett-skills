@@ -184,6 +184,10 @@ def _parse_lookthrough_inputs(commentary: str) -> dict:
         "ownership_percentage": ownership_percentage,
         "investee_net_income": investee_net_income,
         "dividends_received": dividends_received,
+        "has_complete_metrics": all(
+            value is not None
+            for value in (ownership_percentage, investee_net_income, dividends_received)
+        ),
     }
 
 def main():
@@ -270,8 +274,12 @@ class OwnerEarnings:
         
         maintenance_pct_raw = capex_breakdown.get("maintenance_percentage")
         if maintenance_pct_raw is None:
-            maintenance_pct_raw = 100
-        maintenance_pct = float(maintenance_pct_raw) / 100.0
+            maintenance_pct = 1.0
+        else:
+            maintenance_pct = float(maintenance_pct_raw)
+            if maintenance_pct > 1.0:
+                maintenance_pct /= 100.0
+        
         maintenance_capex = total_capex * maintenance_pct
         
         owner_earnings = net_income + depreciation - maintenance_capex
@@ -359,9 +367,9 @@ class KeyFinancialMetrics:
         """
         pass
 
-class LookthroughEarnings:
+class LookthroughEarningsPrinciple:
     """
-    Heuristic: Look-Through Earnings
+    Principle: Look-Through Earnings
     """
     def __init__(self):
         pass
@@ -381,6 +389,12 @@ class LookthroughEarnings:
                     "applicable": False,
                     "reason": "No material equity investee evidence found in recent filings.",
                 }
+            if not lookthrough_inputs["has_complete_metrics"]:
+                return {
+                    "ticker": ticker,
+                    "applicable": False,
+                    "reason": "Investee-related disclosures were found in recent filings, but ownership percentage, investee earnings, and dividends received could not be extracted reliably.",
+                }
             if ownership_percentage is None:
                 ownership_percentage = lookthrough_inputs["ownership_percentage"]
             if investee_net_income is None:
@@ -389,7 +403,7 @@ class LookthroughEarnings:
                 dividends_received = lookthrough_inputs["dividends_received"]
 
         if ownership_percentage is None or investee_net_income is None or dividends_received is None:
-            return {"applicable": False, "reason": "Missing required metrics: ownership_percentage, investee_net_income, and dividends_received are required"}
+            return {"applicable": False, "reason": "Not applicable: No material equity investee evidence found or missing required metrics"}
         if not 0 <= ownership_percentage <= 1:
             raise ValueError("ownership_percentage must be between 0 and 1")
 

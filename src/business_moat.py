@@ -53,7 +53,7 @@ def fetch_goodwill_metrics(ticker: str) -> dict:
     balance_sheet = stock.balance_sheet
     income_stmt = stock.income_stmt
 
-    goodwill = _get_statement_value(balance_sheet, ("Goodwill", "Goodwill And Other Intangible Assets"))
+    goodwill = _get_statement_value(balance_sheet, ("Goodwill", "Goodwill And Other Intangible Assets")) or 0.0
     intangible_assets = _get_statement_value(
         balance_sheet,
         (
@@ -461,21 +461,18 @@ class BusinessModelTypes:
         ticker: str = "",
     ) -> dict:
         if ticker and any(value is None for value in (recurring_revenue_ratio, gross_margin, capital_intensity)):
-            company_info = fetch_company_info(ticker)
-            description = (company_info.get("description") or "").lower()
-            recurring_keywords = (
-                "subscription",
-                "subscriptions",
-                "recurring",
-                "renewal",
-                "renewals",
-                "membership",
-                "software as a service",
-                "saas",
-            )
-            keyword_hits = sum(1 for keyword in recurring_keywords if keyword in description)
-            recurring_revenue_ratio = min(1.0, max(0.1, keyword_hits / 4))
-
+            if recurring_revenue_ratio is None:
+                # Just placeholder default or attempt to fetch it from business description via Ollama
+                # For now we'll set it to 0.0 to prevent nulls unless we want to query
+                try:
+                    business_desc = fetch_filing_section(ticker, form="10-K", start_markers=("item 1. business", "item 1.business"), end_markers=("item 1a", "risk factors"), max_chars=8000)
+                    if business_desc:
+                        prompt = f"Estimate the recurring revenue ratio (0.0 to 1.0) for this business based on its description. Return ONLY JSON: {{\"recurring_revenue_ratio\": float or null}}. Text: {business_desc[:3000]}"
+                        res = call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL)
+                        recurring_revenue_ratio = res.get("recurring_revenue_ratio")
+                except Exception:
+                    pass
+                    
             if gross_margin is None:
                 margins_df = fetch_historical_margins(ticker)
                 if not margins_df.empty:
@@ -487,11 +484,11 @@ class BusinessModelTypes:
                 capex_total = financials.get("capex_total")
                 if total_revenue and capex_total is not None:
                     capital_intensity = abs(float(capex_total)) / float(total_revenue)
+                    
+        if gross_margin is None or capital_intensity is None:
+            return {"applicable": False, "reason": "Not applicable: Could not determine gross margin or capital intensity"}
 
-        if recurring_revenue_ratio is None or gross_margin is None or capital_intensity is None:
-            return {"applicable": False, "reason": "Missing required metrics: recurring_revenue_ratio, gross_margin, and capital_intensity are required"}
-
-        if recurring_revenue_ratio >= BUSINESS_MODEL_RECURRING_REVENUE_MIN:
+        if recurring_revenue_ratio is not None and recurring_revenue_ratio >= BUSINESS_MODEL_RECURRING_REVENUE_MIN:
             model_type = "recurring_revenue"
         elif gross_margin <= BUSINESS_MODEL_ASSET_HEAVY_GROSS_MARGIN_MAX and capital_intensity >= BUSINESS_MODEL_ASSET_HEAVY_CAPITAL_INTENSITY_MIN:
             model_type = "asset_heavy"

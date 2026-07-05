@@ -59,7 +59,7 @@ def fetch_financial_data(ticker_symbol: str) -> Dict[str, Any]:
     ticker = yf.Ticker(ticker_symbol)
     info = ticker.info
     
-    shares_outstanding = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding", 100_000_000)
+    shares_outstanding = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
     
     cashflow = ticker.cashflow
     fcf = 0.0
@@ -80,14 +80,36 @@ def fetch_financial_data(ticker_symbol: str) -> Dict[str, Any]:
             if len(fcfs) >= 2:
                 prev_fcf = fcfs.iloc[1]
                 if prev_fcf > 0 and recent_fcf > 0:
-                    fcf_growth = (recent_fcf / prev_fcf) - 1
+                    calculated_growth = (recent_fcf / prev_fcf) - 1
+                    # Cap growth rate between 2% and 15% for safer DCF projections
+                    fcf_growth = max(0.02, min(calculated_growth, 0.15))
             fcf = recent_fcf
 
     if fcf <= 0:
-        fcf = info.get("freeCashflow", 500_000_000)
+        fcf = info.get("freeCashflow")
         
-    cash = info.get("totalCash", 1_000_000_000)
-    debt = info.get("totalDebt", 2_000_000_000)
+    cash = info.get("totalCash")
+    debt = info.get("totalDebt")
+
+    try:
+        shares_outstanding = int(shares_outstanding) if shares_outstanding is not None else None
+    except (TypeError, ValueError):
+        shares_outstanding = None
+
+    try:
+        fcf = float(fcf) if fcf is not None else None
+    except (TypeError, ValueError):
+        fcf = None
+
+    try:
+        cash = float(cash) if cash is not None else None
+    except (TypeError, ValueError):
+        cash = None
+
+    try:
+        debt = float(debt) if debt is not None else None
+    except (TypeError, ValueError):
+        debt = None
     
     return {
         "ticker": ticker_symbol,
@@ -514,8 +536,11 @@ class MarginOfSafety:
 
         if intrinsic_value <= 0:
             raise ValueError("intrinsic_value must be positive")
+        if market_price <= 0:
+            raise ValueError("market_price must be positive")
 
-        margin = (intrinsic_value - market_price) / intrinsic_value
+        # Express upside/downside relative to the price paid so overvaluation does not explode past -100%.
+        margin = (intrinsic_value - market_price) / market_price
         return {
             "intrinsic_value": intrinsic_value,
             "market_price": market_price,
@@ -713,67 +738,3 @@ class DividendsRetainedEarningsAndTaxEfficiency:
         """
         pass
 
-class SpecialInvestmentInstruments:
-    """
-    Heuristic: Special Investment Instruments
-    """
-    def __init__(self):
-        pass
-
-    def evaluate(self, coupon_rate: float | None = None, conversion_discount: float | None = None, collateral_coverage: float | None = None, ticker: str = "") -> dict:
-        if ticker and (coupon_rate is None or conversion_discount is None or collateral_coverage is None):
-            instrument_metrics = self._fetch_special_instrument_metrics(ticker)
-            if not instrument_metrics["has_special_instrument"]:
-                return {
-                    "ticker": ticker,
-                    "applicable": False,
-                    "reason": "No special investment instrument evidence found in recent filings.",
-                }
-            if coupon_rate is None:
-                coupon_rate = instrument_metrics["coupon_rate"]
-            if conversion_discount is None:
-                conversion_discount = instrument_metrics["conversion_discount"]
-            if collateral_coverage is None:
-                collateral_coverage = instrument_metrics["collateral_coverage"]
-            
-        if coupon_rate is None or conversion_discount is None or collateral_coverage is None:
-            return {"applicable": False, "reason": "Missing required metrics: All metrics must be provided"}
-
-        score = 0
-        if coupon_rate >= SPECIAL_INSTRUMENT_COUPON_RATE_MIN:
-            score += 1
-        if conversion_discount >= SPECIAL_INSTRUMENT_CONVERSION_DISCOUNT_MIN:
-            score += 1
-        if collateral_coverage >= SPECIAL_INSTRUMENT_COLLATERAL_COVERAGE_MIN:
-            score += 1
-
-        attractiveness = "low"
-        if score == 3:
-            attractiveness = "high"
-        elif score == 2:
-            attractiveness = "moderate"
-
-        return {
-            "coupon_rate": coupon_rate,
-            "conversion_discount": conversion_discount,
-            "collateral_coverage": collateral_coverage,
-            "instrument_score": score,
-            "instrument_attractiveness": attractiveness
-        }
-
-    def _fetch_special_instrument_metrics(self, ticker: str) -> dict[str, Any]:
-        commentary = fetch_special_instrument_commentary(ticker)
-        if not commentary:
-            return {
-                "has_special_instrument": False,
-                "coupon_rate": None,
-                "conversion_discount": None,
-                "collateral_coverage": None,
-            }
-        return _parse_special_instrument_metrics(commentary)
-
-    def _helper_method(self):
-        """
-        Example helper method. All internal logic should be _ prefixed.
-        """
-        pass

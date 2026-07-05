@@ -177,7 +177,7 @@ These rely mostly on direct input math and have fewer arbitrary embedded policie
 - `WhenToSellClearCriteria`
 - `CorePrincipleSeeThroughAccountingToEconomicReality`
 - `KeyFinancialMetrics`
-- `LookthroughEarnings`
+- `LookthroughEarningsPrinciple` (should remain outside the universal ticker pipeline; requires uncommon investee-specific disclosures or explicit inputs)
 - `OpportunityCostAwareness`
 - `MarginOfSafety`
 - `DividendsRetainedEarningsAndTaxEfficiency`

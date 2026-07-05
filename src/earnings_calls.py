@@ -1,3 +1,4 @@
+from cache_utils import disk_cache
 import json
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,7 @@ def save_transcripts_to_cache(ticker: str, transcripts: list[dict[str, Any]]) ->
     save_cached_transcripts(ticker, transcripts)
 
 
+@disk_cache()
 def _request_json(url: str, params: dict[str, Any] | None = None) -> Any:
     if not EARNINGSCALLS_API_KEY:
         raise RuntimeError("EARNINGSCALLS_API_KEY is not set")

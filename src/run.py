@@ -10,7 +10,7 @@ import yfinance as yf
 import business_moat
 import comparison_scoring
 import financial_metrics
-import industry_playbooks
+# import industry_playbooks (Removed: Industry playbooks are not universal)
 import investment_philosophy
 import management_governance
 import risk_behavior
@@ -56,7 +56,6 @@ def get_all_heuristic_classes():
         financial_metrics,
         valuation_capital,
         risk_behavior,
-        industry_playbooks,
     ]
 
     classes = {}
@@ -105,6 +104,8 @@ def _build_real_context(ticker: str) -> dict:
         "ticker": ticker,
         "tickers": [ticker],
         "company_name": ticker,
+        "sector": "",
+        "industry": "",
         "description": "",
         "display_description": "",
         "commentary": "",
@@ -128,6 +129,9 @@ def _build_real_context(ticker: str) -> dict:
         context["company_name"] = info.get("shortName") or ticker
         context["description"] = info.get("longBusinessSummary", "")
         context["display_description"] = context["description"]
+
+    context["sector"] = info.get("sector") or ""
+    context["industry"] = info.get("industry") or ""
 
     context["fcf"] = _coerce_float(info.get("freeCashflow"))
     context["recent_free_cash_flow"] = context["fcf"]
@@ -256,6 +260,8 @@ def analyze_company(ticker: str) -> dict:
     context = _build_real_context(ticker)
 
     results["company_name"] = context.get("company_name", ticker)
+    results["sector"] = context.get("sector", "")
+    results["industry"] = context.get("industry", "")
     results["description"] = context.get("display_description") or context.get("description", "")
 
     heuristic_modules = get_all_heuristic_classes()

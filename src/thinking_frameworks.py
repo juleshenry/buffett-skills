@@ -227,6 +227,31 @@ class MrMarket:
     def __init__(self):
         pass
 
+    @staticmethod
+    def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
+        return max(low, min(value, high))
+
+    def _compute_contrarian_score(
+        self,
+        drawdown_from_high: float,
+        distance_from_200d_ma: float,
+        annualized_volatility: float,
+    ) -> tuple[float, float]:
+        # More negative drawdown and distance imply more fear and therefore a more positive contrarian setup.
+        drawdown_component = self._clamp((-drawdown_from_high - 0.05) / 0.25)
+        distance_component = self._clamp((-distance_from_200d_ma) / 0.15)
+        volatility_component = self._clamp((annualized_volatility - 0.20) / 0.25, 0.0, 1.0)
+
+        raw_score = (drawdown_component * 0.5) + (distance_component * 0.35) + (volatility_component * 0.15)
+
+        # Mild premium conditions should lean negative rather than snap to neutral.
+        if drawdown_from_high > -0.03 and distance_from_200d_ma > 0.03:
+            raw_score -= min((drawdown_from_high + distance_from_200d_ma) * 4.0, 0.6)
+
+        contrarian_score = self._clamp(raw_score)
+        signal_strength = abs(contrarian_score)
+        return contrarian_score, signal_strength
+
     def evaluate(self, ticker: str, period: str = DEFAULT_MR_MARKET_PERIOD) -> dict:
         history = yf.Ticker(ticker).history(period=period)
         if history.empty or "Close" not in history:
@@ -246,6 +271,12 @@ class MrMarket:
         daily_returns = close.pct_change().dropna()
         annualized_volatility = float(daily_returns.std() * (TRADING_DAYS_PER_YEAR ** 0.5)) if not daily_returns.empty else 0.0
 
+        contrarian_score, signal_strength = self._compute_contrarian_score(
+            drawdown_from_high=drawdown_from_high,
+            distance_from_200d_ma=distance_from_200d_ma,
+            annualized_volatility=annualized_volatility,
+        )
+
         mood = "neutral"
         if drawdown_from_high <= MR_MARKET_FEAR_DRAWDOWN_MAX and distance_from_200d_ma <= MR_MARKET_FEAR_DISTANCE_FROM_MA_MAX:
             mood = "fear"
@@ -260,6 +291,8 @@ class MrMarket:
             "moving_average_200d": ma_200,
             "distance_from_200d_ma": distance_from_200d_ma,
             "annualized_volatility": annualized_volatility,
+            "contrarian_score": contrarian_score,
+            "signal_strength": signal_strength,
             "mr_market_mood": mood
         }
 

@@ -390,7 +390,7 @@ TEMPLATE = """
                 <div>
                     <div class="flex items-end justify-between mb-4">
                         <h3 class="text-2xl font-black text-gray-900">Heuristic Heatmap</h3>
-                        <p class="text-sm text-gray-500">Quick polarity scan of raw heuristic outputs</p>
+                        <p class="text-sm text-gray-500">Quick polarity scan of scorable heuristic outputs</p>
                     </div>
                 {% for ticker, data in reports.items() %}
                 <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -407,16 +407,29 @@ TEMPLATE = """
                     <div class="flex flex-wrap gap-1">
                         {% for score_obj in data.get('heatmap_scores', []) %}
                             {% set s = score_obj.score %}
-                            {% if s < -0.5 %} {% set color_class = "bg-rose-600" %}
-                            {% elif s < -0.1 %} {% set color_class = "bg-rose-400" %}
-                            {% elif s <= 0.0 %} {% set color_class = "bg-gray-200" %}
-                            {% elif s < 0.5 %} {% set color_class = "bg-emerald-400" %}
-                            {% else %} {% set color_class = "bg-emerald-600" %}
+                            {% if s == -999.0 %} 
+                                {% set color_class = "bg-white border-2 border-dashed border-gray-300 opacity-60 hover:opacity-100" %}
+                                {% set label_text = score_obj.name ~ " (N/A)" %}
+                            {% elif s < -0.5 %} 
+                                {% set color_class = "bg-rose-600" %}
+                                {% set label_text = score_obj.name ~ " (Score: " ~ '%.2f'|format(s) ~ ")" %}
+                            {% elif s < -0.1 %} 
+                                {% set color_class = "bg-rose-400" %}
+                                {% set label_text = score_obj.name ~ " (Score: " ~ '%.2f'|format(s) ~ ")" %}
+                            {% elif s <= 0.0 %} 
+                                {% set color_class = "bg-gray-200" %}
+                                {% set label_text = score_obj.name ~ " (Score: " ~ '%.2f'|format(s) ~ ")" %}
+                            {% elif s < 0.5 %} 
+                                {% set color_class = "bg-emerald-400" %}
+                                {% set label_text = score_obj.name ~ " (Score: " ~ '%.2f'|format(s) ~ ")" %}
+                            {% else %} 
+                                {% set color_class = "bg-emerald-600" %}
+                                {% set label_text = score_obj.name ~ " (Score: " ~ '%.2f'|format(s) ~ ")" %}
                             {% endif %}
                             
                             <button onclick="showHeuristicDetails('{{ ticker }}', '{{ score_obj.category }}', '{{ score_obj.heuristic }}')" class="w-6 h-6 sm:w-8 sm:h-8 rounded-sm {{ color_class }} hover:ring-2 hover:ring-offset-1 hover:ring-indigo-500 cursor-pointer transition-all relative group focus:outline-none focus:ring-2 focus:ring-indigo-600">
                                 <div class="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 hidden group-hover:block bg-gray-900 text-white text-xs py-1 px-2 rounded whitespace-nowrap z-10 shadow-lg pointer-events-none">
-                                    {{ score_obj.name }} (Score: {{ '%.2f'|format(s) }})
+                                    {{ label_text }}
                                 </div>
                             </button>
                         {% endfor %}
@@ -537,15 +550,19 @@ TEMPLATE = """
 
 def calculate_heatmap_scores(data):
     scores = []
-    
-    pos_words = ['strong', 'growth', 'prudence', 'advantage', 'loyalty', 'candor', 'honesty', 'trust', 'attractive', 'value creation', 'moat', 'increase', 'positive', 'discount', 'undervalued', 'quality', 'healthy']
-    neg_words = ['risk', 'erosion', 'decline', 'flaws', 'disruption', 'volatility', 'tensions', 'negative', 'decrease', 'traps', 'avoid', 'debt', 'overvalued', 'poor', 'weak']
-    
+
+    def normalize_to_heatmap(score_100):
+        return max(-1.0, min(1.0, (float(score_100) - 50.0) / 50.0))
+
     def extract_text_and_score(obj):
         text_content = ""
         direct_score = None
         
         if isinstance(obj, dict):
+            # Explicit N/A Check
+            if 'applicable' in obj and obj['applicable'] is False:
+                return "", -999.0
+                
             # Check for high-signal booleans/numbers
             if 'is_undervalued' in obj:
                 direct_score = 1.0 if obj['is_undervalued'] else -1.0
@@ -559,11 +576,30 @@ def calculate_heatmap_scores(data):
                 # If margin > 0 it's good, scale up to 1.0 based on size
                 val = float(obj['margin_of_safety'])
                 direct_score = max(-1.0, min(1.0, val * 2)) 
+            elif 'intrinsic_value_per_share' in obj and 'market_price' in obj:
+                try:
+                    iv = float(obj['intrinsic_value_per_share'])
+                    mp = float(obj['market_price'])
+                    direct_score = 1.0 if iv > mp else -1.0
+                except:
+                    pass
+            elif 'goodwill_quality' in obj:
+                val = str(obj['goodwill_quality']).lower()
+                direct_score = 1.0 if 'economic' in val else -1.0
+            elif any(k in obj for k in ['durability_assessment', 'technology_quality', 'consumer_brand_quality']):
+                key = next(k for k in ['durability_assessment', 'technology_quality', 'consumer_brand_quality'] if k in obj)
+                val = str(obj[key]).lower()
+                if val == 'strong': direct_score = 1.0
+                elif val == 'moderate' or val == 'mixed': direct_score = 0.0
+                elif val == 'weak': direct_score = -1.0
             elif 'mr_market_mood' in obj:
-                mood = str(obj['mr_market_mood']).lower()
-                if mood == 'optimistic': direct_score = 0.8
-                elif mood == 'pessimistic': direct_score = -0.8
-                else: direct_score = 0.0
+                if 'contrarian_score' in obj and isinstance(obj['contrarian_score'], (int, float)):
+                    direct_score = max(-1.0, min(1.0, float(obj['contrarian_score'])))
+                else:
+                    mood = str(obj['mr_market_mood']).lower()
+                    if mood == 'fear': direct_score = 0.8
+                    elif mood == 'greed': direct_score = -0.8
+                    elif mood == 'neutral': direct_score = 0.0
             elif 'profit_margin' in obj and isinstance(obj['profit_margin'], (int, float)):
                 val = float(obj['profit_margin'])
                 direct_score = max(-1.0, min(1.0, val * 5)) # 20% margin = 1.0
@@ -574,13 +610,12 @@ def calculate_heatmap_scores(data):
                 if disc == 'strong': direct_score = 1.0
                 elif disc == 'moderate': direct_score = 0.5
                 elif disc == 'weak': direct_score = -1.0
-                else: direct_score = 0.0
+                elif disc == 'neutral': direct_score = 0.0
             elif 'acquisition_discipline' in obj:
                 disc = str(obj['acquisition_discipline']).lower()
                 if disc == 'strong': direct_score = 1.0
                 elif disc == 'mixed': direct_score = 0.0
                 elif disc == 'weak': direct_score = -1.0
-                else: direct_score = 0.0
             elif 'return_on_invested_capital' in obj and isinstance(obj['return_on_invested_capital'], (int, float)):
                 val = float(obj['return_on_invested_capital'])
                 direct_score = max(-1.0, min(1.0, val * 4)) # 25% ROIC = 1.0
@@ -588,10 +623,65 @@ def calculate_heatmap_scores(data):
                 verdict = str(obj['verdict']).lower()
                 if 'risky' in verdict or 'fail' in verdict or 'avoid' in verdict:
                     direct_score = -1.0
-                elif 'pass' in verdict or 'favorable' in verdict:
+                elif 'pass' in verdict or 'favorable' in verdict or 'investable' in verdict:
                     direct_score = 1.0
             elif 'debt_funded' in obj:
                 direct_score = -1.0 if obj['debt_funded'] else 1.0
+            elif 'economic_reality_assessment' in obj:
+                val = str(obj['economic_reality_assessment']).lower()
+                direct_score = 1.0 if 'cash' in val else -1.0
+            elif 'shareholder_orientation' in obj:
+                val = str(obj['shareholder_orientation']).lower()
+                if val == 'strong': direct_score = 1.0
+                elif val == 'moderate': direct_score = 0.5
+                elif val == 'weak': direct_score = -1.0
+            elif 'buyback_strategy' in obj:
+                val = str(obj['buyback_strategy']).lower()
+                if 'value' in val or 'opportunistic' in val: direct_score = 1.0
+                else: direct_score = -0.5
+            elif 'retained_value_creation' in obj and isinstance(obj['retained_value_creation'], (int, float)):
+                val = float(obj['retained_value_creation'])
+                direct_score = max(-1.0, min(1.0, val * 5))
+            elif 'derivatives_risk' in obj:
+                val = str(obj['derivatives_risk']).lower()
+                if val == 'low': direct_score = 1.0
+                elif val == 'high': direct_score = -1.0
+                else: direct_score = 0.0
+            elif 'leverage_assessment' in obj:
+                val = str(obj['leverage_assessment']).lower()
+                if val == 'low': direct_score = 1.0
+                elif val == 'high': direct_score = -1.0
+                else: direct_score = 0.0
+            elif skill_name == 'LeverageRisk':
+                if 'toxic_derivative_exposure' in obj:
+                    val = str(obj['toxic_derivative_exposure']).lower()
+                    if 'none' in val or 'no ' in val: direct_score = 0.5
+                    elif 'high' in val or 'toxic' in val: direct_score = -1.0
+                    else: direct_score = 0.0
+            elif 'business_model_type' in obj:
+                val = str(obj['business_model_type']).lower()
+                direct_score = 1.0 if val in ['recurring', 'hybrid', 'subscription', 'software', 'franchise'] else -0.5
+            elif 'moat_type' in obj:
+                val = str(obj['moat_type']).lower()
+                direct_score = 1.0 if val != 'none' and val != 'no moat' else -1.0
+
+            if direct_score is None:
+                normalized_candidates = []
+                for k, v in obj.items():
+                    if isinstance(v, bool):
+                        score_100 = comparison_scoring._score_boolean(k, v)
+                        if score_100 is not None:
+                            normalized_candidates.append(normalize_to_heatmap(score_100))
+                    elif isinstance(v, (int, float)):
+                        score_100 = comparison_scoring._score_fixed_scale(k, v)
+                        if score_100 is not None:
+                            normalized_candidates.append(normalize_to_heatmap(score_100))
+                    elif isinstance(v, str):
+                        score_100 = comparison_scoring._score_label(v)
+                        if score_100 is not None:
+                            normalized_candidates.append(normalize_to_heatmap(score_100))
+                if normalized_candidates:
+                    direct_score = sum(normalized_candidates) / len(normalized_candidates)
 
             for k, v in obj.items():
                 if isinstance(v, str):
@@ -601,6 +691,17 @@ def calculate_heatmap_scores(data):
                     text_content += sub_text + " "
                     
         elif isinstance(obj, list):
+            # Special check for Inflation arrays
+            if len(obj) > 0 and isinstance(obj[0], dict) and 'Pricing_Power_Assessment' in obj[0]:
+                has_strong = any(str(item.get('Pricing_Power_Assessment', '')).lower().startswith('strong') for item in obj)
+                has_weak = any(str(item.get('Pricing_Power_Assessment', '')).lower().startswith('weak') for item in obj)
+                if has_strong:
+                    direct_score = 1.0
+                elif has_weak:
+                    direct_score = -1.0
+                else:
+                    direct_score = 0.0
+
             for item in obj:
                 sub_text, _ = extract_text_and_score(item)
                 text_content += sub_text + " "
@@ -620,19 +721,13 @@ def calculate_heatmap_scores(data):
                 score = direct_score
             else:
                 if text_content.strip() == "raw data" or text_content.strip() == "":
-                    score = 0
+                    score = None
                 else:
-                    pos_count = sum(text_content.count(w) for w in pos_words)
-                    neg_count = sum(text_content.count(w) for w in neg_words)
-                    if pos_count > 0 or neg_count > 0:
-                        score = (pos_count - neg_count) / max(pos_count + neg_count, 1)
-                    else:
-                        # Non-empty analysis but no strong sentiment words
-                        score = 0.0
+                    score = None
                 
             scores.append({
                 "name": camel_to_spaces(skill_name).title(), 
-                "score": score,
+                "score": score if score is not None else -999.0,
                 "category": category,
                 "heuristic": skill_name
             })

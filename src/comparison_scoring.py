@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 CATEGORY_ALIASES = {
     "thinking_frameworks": "thinking_frameworks",
-    "investment_philosophy": "investment_performance",
     "business_moat": "moat",
     "management_governance": "management",
     "financial_metrics": "financial_quality",
@@ -63,7 +62,6 @@ PEER_NUMERIC_RULES = {
     "recurring_revenue_ratio": "higher",
     "capital_intensity": "lower",
     "margin_of_safety": "higher",
-    "intrinsic_value_per_share": "higher",
     "fcf_to_debt": "higher",
     "dividend_payout_ratio": "lower",
     "retained_earnings_ratio": "higher",
@@ -340,6 +338,39 @@ def _score_inversion_claim(text: str) -> dict:
     }
 
 
+def _score_inversion_theme(theme: str, claims: list[dict]) -> float | None:
+    relevant_claims = [claim for claim in claims if claim.get("theme") == theme]
+    if not relevant_claims:
+        return None
+
+    theme_keywords = INVERSION_THEME_RULES.get(theme, ())
+    theme_scores = []
+    for claim in relevant_claims:
+        text = str(claim.get("claim", "")).lower()
+        # Remove the leading theme heading so labels do not count as evidence.
+        text = re.sub(r"^\*\*[^*]+\*\*:\s*", "", text).strip()
+
+        matched_keywords = set()
+        for keyword in theme_keywords:
+            if keyword in text:
+                normalized_keyword = keyword.rstrip("s")
+                if any(
+                    normalized_keyword in existing or existing in normalized_keyword
+                    for existing in matched_keywords
+                ):
+                    continue
+                matched_keywords.add(normalized_keyword)
+
+        keyword_hits = len(matched_keywords)
+        keyword_intensity = min(keyword_hits * 6.0, 24.0)
+        score = float(claim.get("risk_score", 0.0)) + keyword_intensity
+        theme_scores.append(_clamp(score, 0.0, 100.0))
+
+    if not theme_scores:
+        return None
+    return _round(sum(theme_scores) / len(theme_scores))
+
+
 def score_inversion_text(text: str) -> dict:
     bullets = _split_bullets(text)
     claims = [_score_inversion_claim(bullet) for bullet in bullets if bullet]
@@ -348,13 +379,16 @@ def score_inversion_text(text: str) -> dict:
 
     composite_risk = sum(claim["risk_score"] for claim in claims) / len(claims)
     confidence = sum(claim["confidence_score"] for claim in claims) / len(claims)
+    themes = {claim["theme"] for claim in claims}
     theme_scores = {}
-    for claim in claims:
-        theme_scores.setdefault(claim["theme"], []).append(claim["risk_score"])
+    for theme in themes:
+        score = _score_inversion_theme(theme, claims)
+        if score is not None:
+            theme_scores[theme] = score
 
     return {
         "claims": claims,
-        "theme_scores": {theme: _round(sum(scores) / len(scores)) for theme, scores in theme_scores.items()},
+        "theme_scores": theme_scores,
         "composite_risk_score": _round(composite_risk),
         "confidence_score": _round(confidence),
     }
@@ -378,6 +412,8 @@ def _record_metric(company: dict, category: str, source_path: str, key: str, val
     metric = {
         "ticker": company.get("ticker"),
         "company_name": company.get("company_name") or company.get("ticker"),
+        "sector": company.get("sector") or "",
+        "industry": company.get("industry") or "",
         "category": category,
         "source_path": source_path,
         "metric_name": key,
@@ -396,6 +432,8 @@ def _extract_metrics_from_mapping(company: dict, category: str, source_path: str
         if value.get("applicable") is False:
             return metrics
         for key, item in value.items():
+            if key in {"panel_judgments", "panel_models", "panel_vote_split"}:
+                continue
             child_path = f"{source_path}.{key}" if source_path else key
             if isinstance(item, dict):
                 metrics.extend(_extract_metrics_from_mapping(company, category, child_path, item))
@@ -475,6 +513,35 @@ def extract_company_metrics(company: dict) -> tuple[list[dict], dict]:
     return metrics, qualitative
 
 
+def _dedupe_metrics(metrics: list[dict]) -> list[dict]:
+    deduped = {}
+    for metric in metrics:
+        dedupe_key = (
+            metric.get("ticker"),
+            metric.get("category"),
+            metric.get("metric_name"),
+            metric.get("source_path", "").split(".")[-1],
+        )
+        existing = deduped.get(dedupe_key)
+        if existing is None or len(metric.get("source_path", "")) < len(existing.get("source_path", "")):
+            deduped[dedupe_key] = metric
+    return list(deduped.values())
+
+
+def _candidate_normalization_buckets(metric: dict) -> list[tuple[str, str, str]]:
+    metric_name = metric["metric_name"]
+    industry = str(metric.get("industry") or "").strip()
+    sector = str(metric.get("sector") or "").strip()
+
+    candidates = []
+    if industry:
+        candidates.append((metric_name, "industry", industry))
+    if sector:
+        candidates.append((metric_name, "sector", sector))
+    candidates.append((metric_name, "all", "all"))
+    return candidates
+
+
 def _apply_peer_normalization(metrics: list[dict]) -> None:
     grouped = {}
     for metric in metrics:
@@ -483,24 +550,41 @@ def _apply_peer_normalization(metrics: list[dict]) -> None:
         direction = metric.get("direction")
         if not direction:
             continue
-        grouped.setdefault(metric["metric_name"], []).append(metric)
+        for bucket in _candidate_normalization_buckets(metric):
+            grouped.setdefault(bucket, []).append(metric)
 
-    for metric_name, items in grouped.items():
+    for metric in metrics:
+        if "normalized_score" in metric:
+            continue
+        direction = metric.get("direction")
+        if not direction:
+            continue
+
+        items = None
+        for bucket in _candidate_normalization_buckets(metric):
+            bucket_items = grouped.get(bucket, [])
+            unique_tickers = {item.get("ticker") for item in bucket_items}
+            if len(unique_tickers) >= 2:
+                items = bucket_items
+                break
+
+        if not items:
+            continue
+
         values = [item["raw_value"] for item in items if _is_number(item.get("raw_value"))]
         if not values:
             continue
         low = min(values)
         high = max(values)
-        for item in items:
-            value = item["raw_value"]
-            if high == low:
-                score = 50.0
-            else:
-                ratio = (float(value) - low) / (high - low)
-                if item.get("direction") == "lower":
-                    ratio = 1.0 - ratio
-                score = ratio * 100.0
-            item["normalized_score"] = _round(_clamp(score))
+        value = metric["raw_value"]
+        if high == low:
+            score = 50.0
+        else:
+            ratio = (float(value) - low) / (high - low)
+            if metric.get("direction") == "lower":
+                ratio = 1.0 - ratio
+            score = ratio * 100.0
+        metric["normalized_score"] = _round(_clamp(score))
 
 
 def _aggregate_company_scores(metrics: list[dict], qualitative: dict) -> dict:
@@ -523,7 +607,12 @@ def _aggregate_company_scores(metrics: list[dict], qualitative: dict) -> dict:
         weighted_total += score * weight
         used_weight += weight
 
-    overall_score = None if used_weight == 0 else _round(weighted_total / used_weight)
+    raw_overall_score = None if used_weight == 0 else (weighted_total / used_weight)
+
+    weighted_category_coverage = used_weight
+    metric_coverage = min(len([metric for metric in metrics if metric.get("normalized_score") is not None]) / 18.0, 1.0)
+    coverage_penalty_factor = (0.65 * weighted_category_coverage) + (0.35 * metric_coverage)
+    overall_score = None if raw_overall_score is None else _round(raw_overall_score * coverage_penalty_factor)
 
     confidence_parts = []
     scored_metrics = len([metric for metric in metrics if metric.get("normalized_score") is not None])
@@ -540,10 +629,14 @@ def _aggregate_company_scores(metrics: list[dict], qualitative: dict) -> dict:
     return {
         "category_scores": category_scores,
         "overall_score": overall_score,
+        "raw_overall_score": _round(raw_overall_score) if raw_overall_score is not None else None,
+        "coverage_penalty_factor": _round(coverage_penalty_factor),
         "confidence_score": confidence_score,
         "coverage": {
             "scored_metrics": scored_metrics,
             "categories_with_scores": len(category_scores),
+            "weighted_category_coverage": _round(weighted_category_coverage * 100.0),
+            "metric_coverage": _round(metric_coverage * 100.0),
         },
     }
 
@@ -554,6 +647,7 @@ def build_comparison(companies: list[dict]) -> dict:
 
     for company in companies:
         metrics, qualitative = extract_company_metrics(company)
+        metrics = _dedupe_metrics(metrics)
         packet = {
             "ticker": company.get("ticker"),
             "company_name": company.get("company_name") or company.get("ticker"),

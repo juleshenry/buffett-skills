@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import requests
 from typing import Dict, Any, Optional
 import yfinance as yf
@@ -61,6 +62,12 @@ def analyze_footnotes_with_ollama(footnotes_text: str) -> Optional[Dict[str, Any
     Forces JSON output extracting specific liability metrics.
     """
     print("Analyzing footnotes with Ollama...")
+    deterministic = _extract_footnote_risk_signals(footnotes_text)
+    if any(
+        deterministic[key] not in ("Not found", "None mentioned")
+        for key in ("operating_lease_obligations", "pension_underfunding", "toxic_derivative_exposure")
+    ):
+        return deterministic
     
     prompt = f"""You are a 'Footnote Detective' analyzing SEC 10-K financial footnotes for hidden liabilities.
 Scan the following footnotes and extract the requested information.
@@ -77,13 +84,139 @@ Respond ONLY with valid JSON. Do not include markdown formatting like ```json or
 """
 
     try:
-        return call_ollama_panel_json(prompt, model=MODEL_NAME)
+        result = call_ollama_panel_json(prompt, model=MODEL_NAME)
+        return normalize_footnote_analysis(result)
     except requests.exceptions.RequestException as e:
         print(f"Error communicating with Ollama: {e}")
         return None
     except Exception as e:
         print(f"Error decoding Ollama JSON response: {e}")
         return None
+
+
+def _coalesce_first_present(*values):
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _extract_numeric_amount(text: str, label_patterns: tuple[str, ...]) -> Optional[float]:
+    if not text:
+        return None
+
+    for label_pattern in label_patterns:
+        match = re.search(
+            rf"{label_pattern}[^\$\d]{{0,120}}(?:\$\s*)?(\d+(?:\.\d+)?)\s*(million|billion)?",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        value = float(match.group(1))
+        unit = (match.group(2) or "").lower()
+        if unit == "billion":
+            value *= 1_000_000_000
+        elif unit == "million":
+            value *= 1_000_000
+        return value
+
+    return None
+
+
+def _extract_footnote_risk_signals(footnotes_text: str) -> Dict[str, Any]:
+    normalized_text = footnotes_text or ""
+    lease_value = _extract_numeric_amount(
+        normalized_text,
+        (
+            r"operating lease obligations",
+            r"operating leases",
+            r"lease liabilities",
+            r"future lease payments",
+        ),
+    )
+    pension_value = _extract_numeric_amount(
+        normalized_text,
+        (
+            r"pension underfunding",
+            r"underfunded status",
+            r"projected benefit obligation in excess of plan assets",
+            r"benefit obligations in excess of plan assets",
+        ),
+    )
+
+    derivatives_summary = None
+    lower_text = normalized_text.lower()
+    if any(term in lower_text for term in ("derivative", "swap", "hedging", "hedge")):
+        derivatives_summary = "Derivative activity disclosed"
+        if any(term in lower_text for term in ("no material", "not material", "immaterial", "none mentioned", "no material exposure")):
+            derivatives_summary = "No material exposure"
+
+    return _normalize_single_footnote_judgment(
+        {
+            "operating_lease_obligations": lease_value,
+            "pension_underfunding": pension_value,
+            "toxic_derivative_exposure": derivatives_summary,
+        }
+    )
+
+
+def _normalize_single_footnote_judgment(result: Dict[str, Any] | None) -> Dict[str, Any]:
+    result = result or {}
+    operating_lease_obligations = _coalesce_first_present(
+        result.get("operating_lease_obligations"),
+        result.get("total_operating_lease_obligations"),
+    )
+    pension_underfunding = _coalesce_first_present(
+        result.get("pension_underfunding"),
+        result.get("pension_plan_underfunding_amount"),
+    )
+    toxic_derivative_exposure = _coalesce_first_present(
+        result.get("toxic_derivative_exposure"),
+        result.get("derivative_exposure_summary"),
+    )
+
+    normalized_operating_lease = operating_lease_obligations if operating_lease_obligations is not None else "Not found"
+    normalized_pension = pension_underfunding if pension_underfunding is not None else "Not found"
+    normalized_derivatives = toxic_derivative_exposure if toxic_derivative_exposure is not None else "None mentioned"
+
+    return {
+        "operating_lease_obligations": normalized_operating_lease,
+        "pension_underfunding": normalized_pension,
+        "toxic_derivative_exposure": normalized_derivatives,
+        "total_operating_lease_obligations": normalized_operating_lease,
+        "pension_plan_underfunding_amount": normalized_pension,
+    }
+
+
+def normalize_footnote_analysis(result: Dict[str, Any] | None) -> Dict[str, Any]:
+    normalized = _normalize_single_footnote_judgment(result)
+    panel_judgments = (result or {}).get("panel_judgments") or {}
+    if not isinstance(panel_judgments, dict):
+        return normalized
+
+    normalized_panel_judgments = {
+        model: _normalize_single_footnote_judgment(judgment)
+        for model, judgment in panel_judgments.items()
+    }
+
+    for key in ("operating_lease_obligations", "pension_underfunding", "toxic_derivative_exposure"):
+        if normalized[key] in ("Not found", "None mentioned"):
+            for judgment in normalized_panel_judgments.values():
+                candidate = judgment.get(key)
+                if candidate not in (None, "", "Not found", "None mentioned"):
+                    normalized[key] = candidate
+                    break
+
+    normalized["panel_judgments"] = normalized_panel_judgments
+    if (result or {}).get("panel_models"):
+        normalized["panel_models"] = result.get("panel_models")
+    if (result or {}).get("_panel_model"):
+        normalized["_panel_model"] = result.get("_panel_model")
+    return normalized
 
 
 def _get_statement_value(statement, names: tuple[str, ...], column_index: int = 0) -> Optional[float]:
@@ -234,6 +367,12 @@ class LeverageRisk:
 
     def evaluate(self, ticker: str) -> dict:
         footnotes = self._fetch_sec_10k_footnotes(ticker)
+        deterministic = _extract_footnote_risk_signals(footnotes)
+        if any(
+            deterministic[key] not in ("Not found", "None mentioned")
+            for key in ("operating_lease_obligations", "pension_underfunding", "toxic_derivative_exposure")
+        ):
+            return deterministic
         analysis = self._analyze_footnotes_with_ollama(footnotes)
         return analysis if analysis else {}
 
@@ -243,7 +382,7 @@ class LeverageRisk:
     def _analyze_footnotes_with_ollama(self, footnotes_text: str) -> dict:
         prompt = f"""Analyze footnotes. Return JSON with 'operating_lease_obligations', 'pension_underfunding', 'toxic_derivative_exposure'. Footnotes: {footnotes_text}"""
         try:
-            return call_ollama_panel_json(prompt, model=MODEL_NAME)
+            return normalize_footnote_analysis(call_ollama_panel_json(prompt, model=MODEL_NAME))
         except Exception:
             return {}
 
@@ -325,10 +464,20 @@ class DerivativesRisk:
                 else:
                     risk = "moderate"
 
+                # Extract specific numbers if available using LLM or default to 0.0
+                if notional_exposure is None and "not found" not in normalized_summary:
+                    prompt = f"Estimate the notional derivative exposure ($ amount) and level 3 assets ratio (0.0 to 1.0) from this footnote summary. If not mentioned, return null. Return ONLY JSON: {{\"notional_exposure\": float or null, \"level_3_assets_ratio\": float or null}}. Text: {toxic_summary}"
+                    try:
+                        res = call_ollama_panel_json(prompt, model=MODEL_NAME)
+                        notional_exposure = res.get("notional_exposure")
+                        level_3_assets_ratio = res.get("level_3_assets_ratio")
+                    except Exception:
+                        pass
+
                 return {
                     "notional_exposure": notional_exposure,
                     "equity_capital": equity_capital,
-                    "exposure_ratio": None,
+                    "exposure_ratio": (notional_exposure / equity_capital) if notional_exposure and equity_capital else None,
                     "level_3_assets_ratio": level_3_assets_ratio,
                     "derivative_exposure_summary": toxic_summary,
                     "derivatives_risk": risk,
@@ -336,11 +485,11 @@ class DerivativesRisk:
 
             return {
                 "applicable": False,
-                "reason": f"Could not derive derivative exposure summary from {ticker} footnotes.",
+                "reason": f"No material derivative exposure found in {ticker} footnotes.",
             }
 
         if notional_exposure is None or equity_capital is None or level_3_assets_ratio is None:
-            return {"applicable": False, "reason": "Missing required metrics: notional_exposure, equity_capital, and level_3_assets_ratio are required"}
+            return {"applicable": False, "reason": "Not applicable: Could not derive derivative exposure summary or missing required metrics"}
 
         exposure_ratio = (notional_exposure / equity_capital) if equity_capital > 0 else None
 
