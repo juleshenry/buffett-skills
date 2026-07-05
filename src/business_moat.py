@@ -1,3 +1,4 @@
+from cache_utils import disk_cache
 import argparse
 import json
 import logging
@@ -46,6 +47,7 @@ def _get_statement_value(statement, names: tuple[str, ...], column_index: int = 
     return None
 
 
+@disk_cache()
 def fetch_goodwill_metrics(ticker: str) -> dict:
     stock = yf.Ticker(ticker)
     balance_sheet = stock.balance_sheet
@@ -157,6 +159,7 @@ def _query_ollama_json(prompt: str, model: str = DEFAULT_MODEL) -> dict:
     
     return {}
 
+@disk_cache()
 def fetch_historical_margins(ticker: str) -> pd.DataFrame:
     """Fetches historical Gross and Operating margins for a given company using yfinance."""
     logger.info(f"Fetching historical financial margins for {ticker}...")
@@ -261,6 +264,7 @@ def overlay_margins_on_inflation(margins_df: pd.DataFrame, inflation_df: pd.Data
     merged_df["Pricing_Power_Assessment"] = merged_df.apply(assess_pricing_power, axis=1)
     return merged_df
 
+@disk_cache()
 def infer_business_details(ticker: str, model: str = DEFAULT_MODEL) -> dict:
     """Use SEC business description where available, then infer products and competitors with Ollama."""
     logger.info(f"Extracting business details for {ticker}...")

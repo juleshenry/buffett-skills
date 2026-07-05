@@ -74,6 +74,10 @@ def save_cached_transcripts(ticker: str, transcripts: list[dict[str, Any]]) -> N
     _cache_path_for_ticker(ticker).write_text(json.dumps(transcripts, indent=2), encoding="utf-8")
 
 
+def save_transcripts_to_cache(ticker: str, transcripts: list[dict[str, Any]]) -> None:
+    save_cached_transcripts(ticker, transcripts)
+
+
 def _request_json(url: str, params: dict[str, Any] | None = None) -> Any:
     if not EARNINGSCALLS_API_KEY:
         raise RuntimeError("EARNINGSCALLS_API_KEY is not set")

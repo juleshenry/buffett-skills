@@ -1,3 +1,4 @@
+from cache_utils import disk_cache
 import yfinance as yf
 import requests
 import json
@@ -21,12 +22,49 @@ from evaluator_thresholds import (
     MR_MARKET_GREED_DRAWDOWN_MIN,
     TRADING_DAYS_PER_YEAR,
 )
+import re
 
 
-def fetch_company_info(ticker: str) -> Dict[str, Any]:
+def _make_display_description(sec_description: str, fallback_summary: str) -> str:
+    text_source = fallback_summary or sec_description or ""
+    text = re.sub(r"\s+", " ", text_source.strip())
+    if not text:
+        return ""
+
+    text = re.sub(r"^item\s+1\s*[\.-–:]\s*business\s*", "", text, flags=re.IGNORECASE)
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    filtered_sentences = []
+
+    boilerplate_patterns = (
+        r"^as used in this annual report",
+        r"^the following discussion should be read in conjunction",
+        r"^references to the",
+    )
+
+    for sentence in sentences:
+        stripped = sentence.strip()
+        if not stripped:
+            continue
+        lowered = stripped.lower()
+        if any(re.match(pattern, lowered) for pattern in boilerplate_patterns):
+            continue
+        filtered_sentences.append(stripped)
+        if len(" ".join(filtered_sentences)) >= 420 or len(filtered_sentences) >= 3:
+            break
+
+    summary = " ".join(filtered_sentences) if filtered_sentences else text
+    if len(summary) <= 420:
+        return summary
+
+    trimmed = summary[:420].rsplit(" ", 1)[0].strip()
+    return trimmed or summary[:420].strip()
+
+
+def _fetch_company_info_cached(ticker: str) -> Dict[str, Any]:
     info = yf.Ticker(ticker).info
     description = ""
     description_source = "yfinance"
+    fallback_summary = info.get("longBusinessSummary", "")
 
     try:
         description = fetch_filing_section(
@@ -42,14 +80,19 @@ def fetch_company_info(ticker: str) -> Dict[str, Any]:
         description = ""
 
     if not description:
-        description = info.get("longBusinessSummary", "")
+        description = fallback_summary
 
     return {
         "ticker": ticker,
         "name": info.get("longName") or info.get("shortName") or ticker,
         "description": description,
+        "display_description": _make_display_description(description, fallback_summary),
         "description_source": description_source,
     }
+
+
+def fetch_company_info(ticker: str) -> Dict[str, Any]:
+    return _fetch_company_info_cached(ticker)
 
 
 def evaluate_simplicity_with_ollama(company_name: str, description: str, model: str = DEFAULT_OLLAMA_MODEL) -> dict:

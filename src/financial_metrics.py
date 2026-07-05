@@ -1,3 +1,4 @@
+from cache_utils import disk_cache
 import json
 import re
 import requests
@@ -23,6 +24,7 @@ def normalize_capex_breakdown(result: dict | None) -> dict:
         "reasoning": result.get("reasoning") or result.get("analysis") or "",
     }
 
+@disk_cache()
 def fetch_deep_financials(ticker: str) -> dict:
     """Fetch deep financials using yfinance."""
     print(f"Fetching deep financials for {ticker} using yfinance...")
@@ -54,6 +56,7 @@ def fetch_deep_financials(ticker: str) -> dict:
         print(f"Error fetching financials for {ticker}: {e}")
         return {}
 
+@disk_cache()
 def fetch_mda_section(ticker: str) -> str:
     """Attempt fetching MD&A section from SEC EDGAR."""
     print(f"Attempting to fetch MD&A section for {ticker} from SEC EDGAR...")
@@ -100,6 +103,7 @@ def query_ollama_capex_breakdown(mda_text: str) -> dict:
         return {}
 
 
+@disk_cache()
 def fetch_lookthrough_commentary(ticker: str) -> str:
     keyword_sets = (
         ("10-K", ("equity method", "equity in earnings", "dividends received", "ownership interest", "investee")),

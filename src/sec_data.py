@@ -1,3 +1,4 @@
+from cache_utils import disk_cache
 import html
 import re
 from typing import Dict, Iterable, Optional
@@ -17,6 +18,7 @@ def get_sec_headers() -> Dict[str, str]:
     return {"User-Agent": DEFAULT_SEC_USER_AGENT}
 
 
+@disk_cache()
 def get_cik_from_ticker(ticker: str) -> str:
     response = requests.get(TICKER_MAP_URL, headers=get_sec_headers(), timeout=60)
     response.raise_for_status()
@@ -165,6 +167,7 @@ def _choose_end_index(text: str, start_index: int, end_markers: Optional[Iterabl
     return len(text)
 
 
+@disk_cache()
 def fetch_latest_filing_text(ticker: str, form: str = "10-K") -> str:
     metadata = get_latest_filing_metadata(ticker, form=form)
     response = requests.get(metadata["filing_url"], headers=get_sec_headers(), timeout=60)
@@ -172,6 +175,7 @@ def fetch_latest_filing_text(ticker: str, form: str = "10-K") -> str:
     return _strip_html(response.text)
 
 
+@disk_cache()
 def fetch_latest_filing_html(ticker: str, form: str = "10-K") -> str:
     metadata = get_latest_filing_metadata(ticker, form=form)
     response = requests.get(metadata["filing_url"], headers=get_sec_headers(), timeout=60)
@@ -336,6 +340,7 @@ def extract_keyword_context(
     return combined
 
 
+@disk_cache()
 def fetch_filing_keyword_context(
     ticker: str,
     form: str,
@@ -354,6 +359,7 @@ def fetch_filing_keyword_context(
     )
 
 
+@disk_cache()
 def fetch_filing_section(
     ticker: str,
     form: str,

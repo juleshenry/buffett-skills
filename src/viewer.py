@@ -1,6 +1,7 @@
 from pathlib import Path
 from flask import Flask, render_template_string
 import glob, json, os
+import comparison_scoring
 
 app = Flask(__name__)
 
@@ -51,6 +52,29 @@ TEMPLATE = """
             }
         }
 
+        const reportsData = {{ reports | tojson }};
+
+        function showHeuristicDetails(ticker, category, heuristic) {
+            const detailsContainer = document.getElementById('details-' + ticker);
+            const titleEl = document.getElementById('details-title-' + ticker);
+            const contentEl = document.getElementById('details-content-' + ticker);
+            
+            const rawData = reportsData[ticker][category][heuristic];
+            
+            // Format title
+            titleEl.textContent = heuristic.replace(/([A-Z])/g, ' $1').trim();
+            
+            // Format content
+            if (typeof rawData === 'object' && rawData !== null) {
+                contentEl.textContent = JSON.stringify(rawData, null, 2);
+            } else {
+                contentEl.textContent = rawData;
+            }
+            
+            // Show container
+            detailsContainer.classList.remove('hidden');
+        }
+
         function showTab(ticker) {
             // Hide all content blocks
             document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
@@ -96,18 +120,22 @@ TEMPLATE = """
                 el.style.display = 'none';
             });
 
-            // Auto-click the first tab on load
-            const firstBtn = document.querySelector('.tab-btn');
-            if(firstBtn) firstBtn.click();
+            // Auto-click the Compare tab on load
+            const compareBtn = document.getElementById('tab-Compare');
+            if(compareBtn) compareBtn.click();
+            else {
+                const firstBtn = document.querySelector('.tab-btn');
+                if(firstBtn) firstBtn.click();
+            }
         });
     </script>
     <style>
         .fade-in { animation: fadeIn 0.3s ease-in-out; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        /* Custom scrollbar for pre tags */
-        pre::-webkit-scrollbar { width: 8px; height: 8px; }
-        pre::-webkit-scrollbar-track { background: transparent; }
-        pre::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        /* Custom scrollbar for pre tags and custom-scrollbar class */
+        pre::-webkit-scrollbar, .custom-scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
+        pre::-webkit-scrollbar-track, .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        pre::-webkit-scrollbar-thumb, .custom-scrollbar::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
     </style>
 </head>
 <body class="bg-gray-100 text-gray-900 font-sans h-screen flex overflow-hidden">
@@ -130,6 +158,11 @@ TEMPLATE = """
             <li class="tab-item" data-ticker="Principles">
                 <button onclick="showTab('Principles')" id="tab-Principles" class="tab-btn w-full text-left px-4 py-3 rounded-xl font-bold transition-all duration-150 text-gray-600 hover:bg-gray-100">
                     Principles
+                </button>
+            </li>
+            <li class="tab-item" data-ticker="Compare">
+                <button onclick="showTab('Compare')" id="tab-Compare" class="tab-btn w-full text-left px-4 py-3 rounded-xl font-bold transition-all duration-150 text-gray-600 hover:bg-gray-100">
+                    Compare
                 </button>
             </li>
             {% for ticker in reports.keys()|sort %}
@@ -207,7 +240,215 @@ TEMPLATE = """
             </div>
         </div>
 
-        {% if not reports %}
+        <div id="content-Compare" class="tab-content hidden max-w-6xl mx-auto pb-20 fade-in">
+            <div class="border-b border-gray-200 pb-6 mb-8">
+                <h2 class="text-5xl font-black text-gray-900 tracking-tight">Compare</h2>
+                <h3 class="text-xl font-bold text-gray-600 mt-2">Normalized rankings, qualitative risks, and heuristic scores across analyzed assets</h3>
+            </div>
+
+            <div class="space-y-8">
+                {% if comparison_reports %}
+                <div class="space-y-8">
+                    {% for comparison_name, comparison in comparison_reports.items() %}
+                    <section class="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 sm:p-8">
+                        <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between border-b border-gray-100 pb-5 mb-6">
+                            <div>
+                                <h3 class="text-3xl font-black text-gray-900 tracking-tight">{{ comparison_name | replace('_', ' ') | replace(' vs ', ' vs ') | title }}</h3>
+                                <p class="text-sm font-semibold text-gray-500 mt-2">
+                                    {{ comparison.get('company_count', 0) }} companies
+                                    {% if comparison.get('generated_at') %}
+                                    <span class="mx-2 text-gray-300">/</span>
+                                    {{ comparison.get('generated_at') }}
+                                    {% endif %}
+                                </p>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-8">
+                            <div class="bg-gray-50 rounded-xl border border-gray-200 p-5">
+                                <h4 class="text-lg font-bold text-gray-900 mb-4">Overall Rankings</h4>
+                                <div class="space-y-3">
+                                    {% for row in comparison.get('rankings', []) %}
+                                    <div class="flex items-center justify-between bg-white rounded-lg border border-gray-200 px-4 py-3">
+                                        <div>
+                                            <div class="text-sm font-black text-gray-900">#{{ row.get('rank') }} {{ row.get('ticker') }}</div>
+                                            <div class="text-xs text-gray-500">{{ row.get('company_name') }}</div>
+                                        </div>
+                                        <div class="text-right">
+                                            <div class="text-sm font-bold text-indigo-700">{{ row.get('overall_score', 'N/A') }}</div>
+                                            <div class="text-xs text-gray-500">Confidence {{ row.get('confidence_score', 'N/A') }}</div>
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+
+                            <div class="bg-gray-50 rounded-xl border border-gray-200 p-5">
+                                <h4 class="text-lg font-bold text-gray-900 mb-4">Category Leaders</h4>
+                                <div class="space-y-3">
+                                    {% for category, rows in comparison.get('category_rankings', {}).items() %}
+                                    {% set leader = rows[0] if rows else None %}
+                                    {% if leader %}
+                                    <div class="flex items-center justify-between bg-white rounded-lg border border-gray-200 px-4 py-3">
+                                        <div>
+                                            <div class="text-sm font-bold text-gray-900">{{ category | camel_to_spaces | title }}</div>
+                                            <div class="text-xs text-gray-500">Leader: {{ leader.get('ticker') }}</div>
+                                        </div>
+                                        <div class="text-sm font-bold text-emerald-700">{{ leader.get('score') }}</div>
+                                    </div>
+                                    {% endif %}
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="mb-8">
+                            <h4 class="text-lg font-bold text-gray-900 mb-4">Qualitative Risk Themes</h4>
+                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                {% for company in comparison.get('companies', []) %}
+                                {% set inversion = company.get('qualitative_scores', {}).get('inversion', {}) %}
+                                {% set management = company.get('qualitative_scores', {}).get('management_sentiment', {}) %}
+                                <div class="bg-gray-50 rounded-xl border border-gray-200 p-5">
+                                    <div class="flex items-start justify-between mb-4">
+                                        <div>
+                                            <h5 class="text-lg font-black text-gray-900">{{ company.get('ticker') }}</h5>
+                                            <p class="text-sm text-gray-500">{{ company.get('company_name') }}</p>
+                                        </div>
+                                        <div class="text-right text-sm">
+                                            <div class="font-bold text-indigo-700">Overall {{ company.get('overall_score', 'N/A') }}</div>
+                                            <div class="text-gray-500">Confidence {{ company.get('confidence_score', 'N/A') }}</div>
+                                        </div>
+                                    </div>
+
+                                    <div class="grid grid-cols-2 gap-3 mb-4">
+                                        <div class="bg-white rounded-lg border border-gray-200 p-3">
+                                            <div class="text-xs uppercase tracking-wide text-gray-500">Inversion Risk</div>
+                                            <div class="text-xl font-black text-rose-700 mt-1">{{ inversion.get('composite_risk_score', 'N/A') }}</div>
+                                        </div>
+                                        <div class="bg-white rounded-lg border border-gray-200 p-3">
+                                            <div class="text-xs uppercase tracking-wide text-gray-500">Mgmt Sentiment</div>
+                                            <div class="text-xl font-black text-emerald-700 mt-1">{{ management.get('sentiment_score', 'N/A') }}</div>
+                                        </div>
+                                    </div>
+
+                                    {% if inversion.get('theme_scores') %}
+                                    <div class="space-y-2">
+                                        {% for theme, score in inversion.get('theme_scores', {}).items() %}
+                                        <div>
+                                            <div class="flex justify-between text-xs font-semibold text-gray-600 mb-1">
+                                                <span>{{ theme | replace('_', ' ') | title }}</span>
+                                                <span>{{ score }}</span>
+                                            </div>
+                                            <div class="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
+                                                <div class="bg-rose-500 h-2.5 rounded-full" style="width: {{ score }}%"></div>
+                                            </div>
+                                        </div>
+                                        {% endfor %}
+                                    </div>
+                                    {% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+
+                        <div class="mb-8">
+                            <h4 class="text-lg font-bold text-gray-900 mb-4">Category Scores By Company</h4>
+                            <div class="overflow-x-auto">
+                                <table class="min-w-full text-sm bg-white border border-gray-200 rounded-xl overflow-hidden">
+                                    <thead class="bg-gray-50 text-gray-600 uppercase tracking-wide text-xs">
+                                        <tr>
+                                            <th class="px-4 py-3 text-left">Ticker</th>
+                                            {% for category in comparison.get('category_rankings', {}).keys() %}
+                                            <th class="px-4 py-3 text-left">{{ category | camel_to_spaces | title }}</th>
+                                            {% endfor %}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for company in comparison.get('companies', []) %}
+                                        <tr class="border-t border-gray-100">
+                                            <td class="px-4 py-3 font-bold text-gray-900">{{ company.get('ticker') }}</td>
+                                            {% for category in comparison.get('category_rankings', {}).keys() %}
+                                            <td class="px-4 py-3 text-gray-700">{{ company.get('category_scores', {}).get(category, 'N/A') }}</td>
+                                            {% endfor %}
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <details class="text-sm text-gray-500">
+                            <summary class="cursor-pointer hover:text-indigo-600 font-semibold">Raw Comparison Data</summary>
+                            <pre class="mt-3 text-xs bg-gray-900 text-emerald-400 p-4 rounded overflow-x-auto">{{ comparison | tojson(indent=2) }}</pre>
+                        </details>
+                    </section>
+                    {% endfor %}
+                </div>
+                {% endif %}
+
+                {% if reports %}
+                <div>
+                    <div class="flex items-end justify-between mb-4">
+                        <h3 class="text-2xl font-black text-gray-900">Heuristic Heatmap</h3>
+                        <p class="text-sm text-gray-500">Quick polarity scan of raw heuristic outputs</p>
+                    </div>
+                {% for ticker, data in reports.items() %}
+                <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                    <div class="flex justify-between items-end mb-4 border-b border-gray-100 pb-2">
+                        <div>
+                            <h3 class="text-2xl font-black text-gray-900 tracking-tight">{{ ticker }}</h3>
+                            <p class="text-sm font-bold text-gray-500">{{ data.get('company_name', ticker) }}</p>
+                        </div>
+                        <button onclick="showTab('{{ ticker }}')" class="text-sm font-bold text-indigo-600 hover:text-indigo-800 transition-colors">
+                            View Details &rarr;
+                        </button>
+                    </div>
+                    
+                    <div class="flex flex-wrap gap-1">
+                        {% for score_obj in data.get('heatmap_scores', []) %}
+                            {% set s = score_obj.score %}
+                            {% if s < -0.5 %} {% set color_class = "bg-rose-600" %}
+                            {% elif s < -0.1 %} {% set color_class = "bg-rose-400" %}
+                            {% elif s <= 0.0 %} {% set color_class = "bg-gray-200" %}
+                            {% elif s < 0.5 %} {% set color_class = "bg-emerald-400" %}
+                            {% else %} {% set color_class = "bg-emerald-600" %}
+                            {% endif %}
+                            
+                            <button onclick="showHeuristicDetails('{{ ticker }}', '{{ score_obj.category }}', '{{ score_obj.heuristic }}')" class="w-6 h-6 sm:w-8 sm:h-8 rounded-sm {{ color_class }} hover:ring-2 hover:ring-offset-1 hover:ring-indigo-500 cursor-pointer transition-all relative group focus:outline-none focus:ring-2 focus:ring-indigo-600">
+                                <div class="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 hidden group-hover:block bg-gray-900 text-white text-xs py-1 px-2 rounded whitespace-nowrap z-10 shadow-lg pointer-events-none">
+                                    {{ score_obj.name }} (Score: {{ '%.2f'|format(s) }})
+                                </div>
+                            </button>
+                        {% endfor %}
+                    </div>
+                    
+                    <div id="details-{{ ticker }}" class="hidden mt-6 bg-gray-900 rounded-xl overflow-hidden shadow-inner border border-gray-800 transition-all">
+                        <div class="px-4 py-3 bg-gray-800 border-b border-gray-700 flex justify-between items-center">
+                            <h4 id="details-title-{{ ticker }}" class="font-bold text-gray-200 text-sm tracking-wide uppercase"></h4>
+                            <button onclick="document.getElementById('details-{{ ticker }}').classList.add('hidden')" class="text-gray-400 hover:text-white transition-colors focus:outline-none">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <div class="p-4 overflow-x-auto max-h-96 overflow-y-auto custom-scrollbar">
+                            <pre id="details-content-{{ ticker }}" class="text-emerald-400 font-mono text-sm whitespace-pre-wrap bg-transparent p-0 m-0 leading-relaxed"></pre>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+                <p class="text-xs text-gray-400 mt-2 text-center">Each box represents one specific framework/heuristic. Color corresponds to normalized polarity: Red (Negative/Risk), Gray (Neutral/Raw), Green (Positive/Advantage).</p>
+                </div>
+                {% endif %}
+
+                {% if not comparison_reports and not reports %}
+                <div class="text-center py-16 px-10 bg-white shadow-xl rounded-3xl max-w-md border border-gray-100 mx-auto">
+                    <p class="text-gray-500 text-xl font-medium mb-3">No analysis or comparison files found.</p>
+                    <p class="text-gray-400">Run the pipeline first to generate data in <code class="bg-gray-100 px-2 py-1 rounded text-sm text-gray-600">output/</code></p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if not reports and not comparison_reports %}
         <div class="flex items-center justify-center h-full">
             <div class="text-center py-16 px-10 bg-white shadow-xl rounded-3xl max-w-md border border-gray-100">
                 <p class="text-gray-500 text-xl font-medium mb-3">No analysis files found.</p>
@@ -294,6 +535,110 @@ TEMPLATE = """
 </html>
 """
 
+def calculate_heatmap_scores(data):
+    scores = []
+    
+    pos_words = ['strong', 'growth', 'prudence', 'advantage', 'loyalty', 'candor', 'honesty', 'trust', 'attractive', 'value creation', 'moat', 'increase', 'positive', 'discount', 'undervalued', 'quality', 'healthy']
+    neg_words = ['risk', 'erosion', 'decline', 'flaws', 'disruption', 'volatility', 'tensions', 'negative', 'decrease', 'traps', 'avoid', 'debt', 'overvalued', 'poor', 'weak']
+    
+    def extract_text_and_score(obj):
+        text_content = ""
+        direct_score = None
+        
+        if isinstance(obj, dict):
+            # Check for high-signal booleans/numbers
+            if 'is_undervalued' in obj:
+                direct_score = 1.0 if obj['is_undervalued'] else -1.0
+            elif 'inside_circle' in obj:
+                direct_score = 1.0 if obj['inside_circle'] else -1.0
+            elif 'avoid_industry' in obj:
+                direct_score = -1.0 if obj['avoid_industry'] else 1.0
+            elif 'is_value_trap' in obj:
+                direct_score = -1.0 if obj['is_value_trap'] else 1.0
+            elif 'margin_of_safety' in obj and isinstance(obj['margin_of_safety'], (int, float)):
+                # If margin > 0 it's good, scale up to 1.0 based on size
+                val = float(obj['margin_of_safety'])
+                direct_score = max(-1.0, min(1.0, val * 2)) 
+            elif 'mr_market_mood' in obj:
+                mood = str(obj['mr_market_mood']).lower()
+                if mood == 'optimistic': direct_score = 0.8
+                elif mood == 'pessimistic': direct_score = -0.8
+                else: direct_score = 0.0
+            elif 'profit_margin' in obj and isinstance(obj['profit_margin'], (int, float)):
+                val = float(obj['profit_margin'])
+                direct_score = max(-1.0, min(1.0, val * 5)) # 20% margin = 1.0
+            elif 'owner_earnings' in obj and isinstance(obj['owner_earnings'], (int, float)):
+                direct_score = 1.0 if float(obj['owner_earnings']) > 0 else -1.0
+            elif 'capital_allocation_discipline' in obj:
+                disc = str(obj['capital_allocation_discipline']).lower()
+                if disc == 'strong': direct_score = 1.0
+                elif disc == 'moderate': direct_score = 0.5
+                elif disc == 'weak': direct_score = -1.0
+                else: direct_score = 0.0
+            elif 'acquisition_discipline' in obj:
+                disc = str(obj['acquisition_discipline']).lower()
+                if disc == 'strong': direct_score = 1.0
+                elif disc == 'mixed': direct_score = 0.0
+                elif disc == 'weak': direct_score = -1.0
+                else: direct_score = 0.0
+            elif 'return_on_invested_capital' in obj and isinstance(obj['return_on_invested_capital'], (int, float)):
+                val = float(obj['return_on_invested_capital'])
+                direct_score = max(-1.0, min(1.0, val * 4)) # 25% ROIC = 1.0
+            elif 'verdict' in obj:
+                verdict = str(obj['verdict']).lower()
+                if 'risky' in verdict or 'fail' in verdict or 'avoid' in verdict:
+                    direct_score = -1.0
+                elif 'pass' in verdict or 'favorable' in verdict:
+                    direct_score = 1.0
+            elif 'debt_funded' in obj:
+                direct_score = -1.0 if obj['debt_funded'] else 1.0
+
+            for k, v in obj.items():
+                if isinstance(v, str):
+                    text_content += v + " "
+                elif isinstance(v, (dict, list)):
+                    sub_text, _ = extract_text_and_score(v)
+                    text_content += sub_text + " "
+                    
+        elif isinstance(obj, list):
+            for item in obj:
+                sub_text, _ = extract_text_and_score(item)
+                text_content += sub_text + " "
+        elif isinstance(obj, str):
+            text_content += obj + " "
+            
+        return text_content.lower(), direct_score
+
+    for category, results in data.items():
+        if category in ['ticker', 'company_name', 'description'] or not isinstance(results, dict):
+            continue
+            
+        for skill_name, skill_content in results.items():
+            text_content, direct_score = extract_text_and_score(skill_content)
+            
+            if direct_score is not None:
+                score = direct_score
+            else:
+                if text_content.strip() == "raw data" or text_content.strip() == "":
+                    score = 0
+                else:
+                    pos_count = sum(text_content.count(w) for w in pos_words)
+                    neg_count = sum(text_content.count(w) for w in neg_words)
+                    if pos_count > 0 or neg_count > 0:
+                        score = (pos_count - neg_count) / max(pos_count + neg_count, 1)
+                    else:
+                        # Non-empty analysis but no strong sentiment words
+                        score = 0.0
+                
+            scores.append({
+                "name": camel_to_spaces(skill_name).title(), 
+                "score": score,
+                "category": category,
+                "heuristic": skill_name
+            })
+            
+    return scores
+
 @app.route('/')
 def index():
     reports = {}
@@ -301,11 +646,27 @@ def index():
         ticker = os.path.basename(file_path).split("_")[0]
         try:
             with open(file_path, "r") as f:
-                reports[ticker] = json.load(f)
+                data = json.load(f)
+                data['heatmap_scores'] = calculate_heatmap_scores(data)
+                reports[ticker] = data
         except json.JSONDecodeError as e:
             print(f"Warning: Could not parse {file_path}. Skipping. Error: {e}")
             continue
-    
+
+    comparison_reports = {}
+    for file_path in glob.glob(str(OUTPUT_DIR / "*_comparison.json")):
+        comparison_name = os.path.basename(file_path).replace("_comparison.json", "")
+        try:
+            with open(file_path, "r") as f:
+                comparison_reports[comparison_name] = json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"Warning: Could not parse {file_path}. Skipping. Error: {e}")
+            continue
+
+    if reports and not comparison_reports:
+        analyses = list(reports.values())
+        comparison_reports["live_compare"] = comparison_scoring.build_comparison(analyses)
+
     # Load Markdown files for the About section
     markdown_files = []
     md_paths = sorted(glob.glob(str(REFERENCES_DIR / "*.md")))
@@ -325,7 +686,13 @@ def index():
                 "content": f.read()
             })
             
-    return render_template_string(TEMPLATE, reports=reports, markdown_files=markdown_files, principle_files=principle_files)
+    return render_template_string(
+        TEMPLATE,
+        reports=reports,
+        comparison_reports=dict(sorted(comparison_reports.items())),
+        markdown_files=markdown_files,
+        principle_files=principle_files,
+    )
 
 if __name__ == "__main__":
     print("Starting Buffett Skills Viewer on http://127.0.0.1:5052")

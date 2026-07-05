@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
@@ -48,6 +49,17 @@ class TestRunPipeline(unittest.TestCase):
         self.assertEqual(missing, [])
         self.assertEqual(kwargs["intrinsic_value"], 120.0)
         self.assertEqual(kwargs["market_price"], 100.0)
+
+    def test_make_json_safe_coerces_numpy_scalar_types(self):
+        value = {
+            "flag": np.bool_(True),
+            "count": np.int64(3),
+            "ratio": np.float64(1.5),
+        }
+
+        result = run._make_json_safe(value)
+
+        self.assertEqual(result, {"flag": True, "count": 3, "ratio": 1.5})
 
     @patch("run.business_moat.fetch_cpi_inflation_data")
     @patch("run.business_moat.fetch_historical_margins")

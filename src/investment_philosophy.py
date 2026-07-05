@@ -1,3 +1,4 @@
+from cache_utils import disk_cache
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
@@ -59,7 +60,7 @@ def fetch_price_comparison_data(
 
 
 def analyze_investment_philosophy(ticker: str, years: int = DEFAULT_LOOKBACK_YEARS, benchmark: str = DEFAULT_BENCHMARK) -> dict:
-    result_df = Compounding().evaluate([ticker], years=years, benchmark=benchmark)
+    result_df = fetch_batch_cagrs([ticker], years=years, benchmark=benchmark)
     if result_df.empty:
         return {"ticker": ticker, "error": "No data fetched"}
 
@@ -124,6 +125,7 @@ class UndervaluedMarginOfSafety:
         """
         pass
 
+@disk_cache()
 def fetch_batch_cagrs(tickers: List[str], years: int = DEFAULT_LOOKBACK_YEARS, benchmark: str = DEFAULT_BENCHMARK) -> pd.DataFrame:
     """
     Fetches price history and calculates CAGR.

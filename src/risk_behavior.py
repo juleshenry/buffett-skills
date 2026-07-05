@@ -334,6 +334,11 @@ class DerivativesRisk:
                     "derivatives_risk": risk,
                 }
 
+            return {
+                "applicable": False,
+                "reason": f"Could not derive derivative exposure summary from {ticker} footnotes.",
+            }
+
         if notional_exposure is None or equity_capital is None or level_3_assets_ratio is None:
             return {"applicable": False, "reason": "Missing required metrics: notional_exposure, equity_capital, and level_3_assets_ratio are required"}
 

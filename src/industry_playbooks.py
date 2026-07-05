@@ -1,3 +1,4 @@
+from cache_utils import disk_cache
 import json
 import urllib.request
 import urllib.parse
@@ -40,6 +41,7 @@ def _description_keyword_ratio(description: str, keywords: tuple[str, ...], cap:
     return min(cap, hits / max(len(keywords), 1))
 
 
+@disk_cache()
 def fetch_media_metrics(ticker: str) -> dict:
     company_info = fetch_company_info(ticker)
     description = company_info.get("description", "")
@@ -91,6 +93,7 @@ def fetch_media_metrics(ticker: str) -> dict:
     }
 
 
+@disk_cache()
 def fetch_insurance_metrics(ticker: str) -> dict:
     insurance_context = ""
     for form in ("10-K", "10-Q"):
@@ -146,6 +149,7 @@ def query_ollama(prompt: str, context_text: str, model: str = DEFAULT_OLLAMA_MOD
         print(f"Error querying Ollama: {e}")
         return None
 
+@disk_cache()
 def fetch_industry_data(ticker: str, industry_type: str) -> Dict[str, Any]:
     """
     Fetch industry-specific data using yfinance and SEC EDGAR.
@@ -328,6 +332,14 @@ class InsuranceFloat:
 
         if current_float is None or prior_float is None or combined_ratio is None:
             return {"applicable": False, "reason": "Missing required metrics: current_float, prior_float, and combined_ratio are required"}
+        
+        # Protect against non-numeric data coming from LLM
+        try:
+            current_float = float(current_float)
+            prior_float = float(prior_float)
+            combined_ratio = float(combined_ratio)
+        except (ValueError, TypeError):
+            return {"applicable": False, "reason": "Extracted float/ratio metrics were not numeric"}
 
         float_growth = current_float - prior_float
         if float_growth > 0 and combined_ratio < UNDERWRITING_DISCIPLINED_COMBINED_RATIO_MAX:
@@ -393,7 +405,7 @@ class ConsumerBrandsRetail:
             brand_share_trend = brand_share_trend if brand_share_trend is not None else 0.0 # Approximation if not fetchable
             
         if gross_margin is None or same_store_sales_growth is None or brand_share_trend is None:
-            raise ValueError("All metrics must be provided or fetchable via ticker")
+            return {"applicable": False, "reason": "Missing required metrics: All metrics must be provided or fetchable via ticker"}
 
         score = 0
         if gross_margin >= CONSUMER_BRAND_GROSS_MARGIN_MIN:
@@ -435,7 +447,7 @@ class MediaPublishing:
                 churn_rate = metrics.get("churn_rate")
              
         if subscription_revenue_ratio is None or ad_revenue_ratio is None or churn_rate is None:
-            raise ValueError("All metrics must be provided or fetchable via ticker")
+            return {"applicable": False, "reason": "Missing required metrics: All metrics must be provided or fetchable via ticker"}
 
         score = 0
         if subscription_revenue_ratio >= MEDIA_SUBSCRIPTION_REVENUE_MIN:
@@ -478,7 +490,7 @@ class EnergyUtilities:
             allowed_return_on_equity = allowed_return_on_equity if allowed_return_on_equity is not None else info.get("returnOnEquity", 0.0)
 
         if regulated_asset_ratio is None or debt_to_ebitda is None or allowed_return_on_equity is None:
-            raise ValueError("All metrics must be provided or fetchable via ticker")
+            return {"applicable": False, "reason": "Missing required metrics: All metrics must be provided or fetchable via ticker"}
 
         score = 0
         if regulated_asset_ratio >= UTILITY_REGULATED_ASSET_RATIO_MIN:
@@ -520,11 +532,15 @@ class Railways:
                 owner_earnings = OwnerEarnings().evaluate(ticker)
                 total_capex = owner_earnings.get("total_capex")
                 maintenance_capex = owner_earnings.get("maintenance_capex_estimate")
-                if total_capex:
+                if total_capex and maintenance_capex is None:
+                    # OwnerEarnings falls back to treating all capex as maintenance
+                    # when it cannot infer a split from filings/LLM output.
+                    maintenance_capex = total_capex
+                if total_capex and maintenance_capex is not None:
                     maintenance_capex_ratio = maintenance_capex / total_capex
              
         if operating_ratio is None or volume_growth is None or maintenance_capex_ratio is None:
-            raise ValueError("All metrics must be provided or fetchable via ticker")
+            return {"applicable": False, "reason": "Missing required metrics: All metrics must be provided or fetchable via ticker"}
 
         score = 0
         if operating_ratio <= RAILWAY_OPERATING_RATIO_MAX:
@@ -566,7 +582,7 @@ class TechnologyInternet:
             stock_comp_ratio = stock_comp_ratio if stock_comp_ratio is not None else 0.10
 
         if recurring_revenue_ratio is None or net_revenue_retention is None or stock_comp_ratio is None:
-            raise ValueError("All metrics must be provided or fetchable via ticker")
+            return {"applicable": False, "reason": "Missing required metrics: All metrics must be provided or fetchable via ticker"}
 
         score = 0
         if recurring_revenue_ratio >= TECH_RECURRING_REVENUE_MIN:
@@ -629,7 +645,7 @@ class IndustriesToAvoidCounterexamples:
                 pricing_power = gross_margin
 
         if commodity_exposure is None or leverage_ratio is None or pricing_power is None:
-            raise ValueError("All metrics must be provided or fetchable via ticker")
+            return {"applicable": False, "reason": "Missing required metrics: All metrics must be provided or fetchable via ticker"}
 
         red_flags = 0
         if commodity_exposure >= AVOID_INDUSTRY_COMMODITY_EXPOSURE_MIN:

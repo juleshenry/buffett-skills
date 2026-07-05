@@ -1,3 +1,4 @@
+from cache_utils import disk_cache
 import json
 import re
 import requests
@@ -50,6 +51,7 @@ def fetch_risk_free_rate() -> float:
         print(f"Error fetching ^TNX: {e}")
     return RISK_FREE_RATE_FALLBACK
 
+@disk_cache()
 def fetch_financial_data(ticker_symbol: str) -> Dict[str, Any]:
     """
     Fetches shares outstanding, historical cash flows, and balance sheet items via yfinance.
@@ -98,6 +100,7 @@ def fetch_financial_data(ticker_symbol: str) -> Dict[str, Any]:
 
 
 def fetch_current_market_price(ticker_symbol: str) -> float:
+    import yfinance as yf
     ticker = yf.Ticker(ticker_symbol)
     info = ticker.info or {}
     current_price = info.get("currentPrice") or info.get("regularMarketPrice")
@@ -108,8 +111,33 @@ def fetch_current_market_price(ticker_symbol: str) -> float:
     if not history.empty and "Close" in history:
         return float(history["Close"].dropna().iloc[-1])
 
-    raise ValueError(f"No current market price available for {ticker_symbol}")
+    # Try downloading just the stock price via download
+    try:
+        import yfinance as yf
+        data = yf.download(ticker_symbol, period="5d", progress=False)
+        if not data.empty and "Close" in data:
+            val = data["Close"].dropna().iloc[-1]
+            if hasattr(val, "item"): val = val.item()
+            return float(val)
+    except Exception:
+        pass
 
+    # If everything fails, try downloading just 1 day without period and catching the scalar
+    try:
+        import yfinance as yf
+        import pandas as pd
+        data = yf.download(ticker_symbol, progress=False)
+        if not data.empty and "Close" in data:
+            val = data["Close"].dropna().iloc[-1]
+            if hasattr(val, "item"): val = val.item()
+            elif isinstance(val, pd.Series): val = val.iloc[-1]
+            return float(val)
+    except Exception:
+        pass
+
+    raise RuntimeError(f"Could not fetch current market price for {ticker_symbol} using yfinance")
+
+@disk_cache()
 def fetch_management_commentary(ticker_symbol: str) -> str:
     """
     Fetches real SEC management commentary relevant to repurchases or capital allocation.
@@ -147,6 +175,7 @@ def fetch_management_commentary(ticker_symbol: str) -> str:
         return "No SEC management commentary available."
 
 
+@disk_cache()
 def fetch_special_instrument_commentary(ticker_symbol: str) -> str:
     keyword_sets = (
         (
@@ -660,7 +689,7 @@ class DividendsRetainedEarningsAndTaxEfficiency:
             retained_return_on_equity = retained_return_on_equity if retained_return_on_equity is not None else info.get("returnOnEquity", 0.0)
             
         if dividend_payout_ratio is None or retained_return_on_equity is None:
-            raise ValueError("All metrics must be provided or fetchable via ticker")
+            return {"applicable": False, "reason": "Missing required metrics: All metrics must be provided or fetchable via ticker"}
 
         retained_earnings_ratio = 1 - dividend_payout_ratio
         after_tax_dividend_value = dividend_payout_ratio * (1 - tax_rate_on_dividends)
@@ -708,7 +737,7 @@ class SpecialInvestmentInstruments:
                 collateral_coverage = instrument_metrics["collateral_coverage"]
             
         if coupon_rate is None or conversion_discount is None or collateral_coverage is None:
-            raise ValueError("All metrics must be provided")
+            return {"applicable": False, "reason": "Missing required metrics: All metrics must be provided"}
 
         score = 0
         if coupon_rate >= SPECIAL_INSTRUMENT_COUPON_RATE_MIN:

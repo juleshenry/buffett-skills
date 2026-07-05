@@ -8,6 +8,7 @@ import pandas as pd
 import yfinance as yf
 
 import business_moat
+import comparison_scoring
 import financial_metrics
 import industry_playbooks
 import investment_philosophy
@@ -73,8 +74,29 @@ def _make_json_safe(value):
         return {key: _make_json_safe(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_make_json_safe(item) for item in value]
+    if type(value).__module__ == 'numpy':
+        if hasattr(value, "item"):
+            try:
+                return _make_json_safe(value.item())
+            except Exception:
+                pass
+        # Fallback for numpy types
+        if 'bool' in type(value).__name__.lower():
+            return bool(value)
+        if 'int' in type(value).__name__.lower():
+            return int(value)
+        if 'float' in type(value).__name__.lower():
+            return float(value)
+    if hasattr(value, "item") and callable(value.item):
+        try:
+            return _make_json_safe(value.item())
+        except Exception:
+            pass
     if isinstance(value, float) and not math.isfinite(value):
         return None
+    # Catch any remaining numpy bools
+    if 'bool' in type(value).__name__.lower() and not isinstance(value, bool):
+        return bool(value)
     return value
 
 
@@ -84,6 +106,7 @@ def _build_real_context(ticker: str) -> dict:
         "tickers": [ticker],
         "company_name": ticker,
         "description": "",
+        "display_description": "",
         "commentary": "",
     }
 
@@ -99,10 +122,12 @@ def _build_real_context(ticker: str) -> dict:
         company_info = thinking_frameworks.fetch_company_info(ticker)
         context["company_name"] = company_info.get("name") or info.get("shortName") or ticker
         context["description"] = company_info.get("description", "")
+        context["display_description"] = company_info.get("display_description", context["description"])
     except Exception as e:
         logger.error(f"Error fetching company info for {ticker}: {e}")
         context["company_name"] = info.get("shortName") or ticker
         context["description"] = info.get("longBusinessSummary", "")
+        context["display_description"] = context["description"]
 
     context["fcf"] = _coerce_float(info.get("freeCashflow"))
     context["recent_free_cash_flow"] = context["fcf"]
@@ -143,7 +168,7 @@ def _build_real_context(ticker: str) -> dict:
             context["benchmark_cagr"] = _coerce_float(compounding.get("benchmark_cagr"))
             context["long_term_years"] = _coerce_float(compounding.get("period_years"))
     except Exception as e:
-        logger.error(f"Error fetching compounding data for {ticker}: {e}")
+        logger.error(f"Error fetching compounding data for {ticker}: {e}", exc_info=True)
 
     try:
         moat_details = business_moat.infer_business_details(ticker)
@@ -231,7 +256,7 @@ def analyze_company(ticker: str) -> dict:
     context = _build_real_context(ticker)
 
     results["company_name"] = context.get("company_name", ticker)
-    results["description"] = context.get("description", "")
+    results["description"] = context.get("display_description") or context.get("description", "")
 
     heuristic_modules = get_all_heuristic_classes()
 
@@ -266,18 +291,40 @@ def main(argv=None):
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("ticker")
+    parser.add_argument("tickers", nargs="+")
+    parser.add_argument(
+        "--compare-existing",
+        action="store_true",
+        help="Treat positional arguments as paths to existing *_analysis.json files and only build a comparison output.",
+    )
     args = parser.parse_args(argv)
 
-    ticker_symbol = args.ticker.upper()
-    logger.info(f"Starting exhaustive 49-heuristic pipeline for {ticker_symbol}...")
-
-    final_output = _make_json_safe(analyze_company(ticker_symbol))
     OUTPUT_DIR.mkdir(exist_ok=True)
-    output_filename = OUTPUT_DIR / f"{ticker_symbol}_analysis.json"
-    with output_filename.open("w") as f:
-        json.dump(final_output, f, indent=2)
-    logger.info(f"Successfully saved full analysis to {output_filename}")
+
+    if args.compare_existing:
+        analyses = comparison_scoring.load_analysis_files(args.tickers)
+        tickers = [analysis.get("ticker", "UNKNOWN") for analysis in analyses]
+        if len(analyses) < 2:
+            raise ValueError("Need at least two valid analysis files to build a comparison")
+    else:
+        analyses = []
+        tickers = [ticker.upper() for ticker in args.tickers]
+        for ticker_symbol in tickers:
+            logger.info(f"Starting exhaustive 49-heuristic pipeline for {ticker_symbol}...")
+            final_output = _make_json_safe(analyze_company(ticker_symbol))
+            analyses.append(final_output)
+            output_filename = OUTPUT_DIR / f"{ticker_symbol}_analysis.json"
+            with output_filename.open("w") as f:
+                json.dump(final_output, f, indent=2)
+            logger.info(f"Successfully saved full analysis to {output_filename}")
+
+    if len(analyses) > 1:
+        comparison = comparison_scoring.build_comparison(analyses)
+        comparison_name = "_vs_".join(tickers)
+        comparison_filename = OUTPUT_DIR / f"{comparison_name}_comparison.json"
+        with comparison_filename.open("w") as f:
+            json.dump(_make_json_safe(comparison), f, indent=2)
+        logger.info(f"Successfully saved comparison to {comparison_filename}")
 
 
 if __name__ == "__main__":

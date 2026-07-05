@@ -571,6 +571,20 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["derivatives_risk"], "low")
         self.assertEqual(result["derivative_exposure_summary"], "No material exposure")
 
+    @patch("risk_behavior.yf.Ticker")
+    @patch("risk_behavior.LeverageRisk.evaluate")
+    def test_derivatives_risk_returns_not_applicable_when_footnotes_do_not_yield_derivative_summary(self, mock_leverage_risk, mock_ticker):
+        mock_leverage_risk.return_value = {}
+        mock_ticker.return_value.balance_sheet = pd.DataFrame(
+            {pd.Timestamp("2024-12-31"): [500.0]},
+            index=["Stockholders Equity"],
+        )
+
+        result = DerivativesRisk().evaluate(ticker="AAPL")
+
+        self.assertFalse(result["applicable"])
+        self.assertIn("Could not derive derivative exposure summary", result["reason"])
+
     @patch("business_moat.fetch_cpi_inflation_data")
     @patch("business_moat.fetch_historical_margins")
     def test_impact_of_inflation_fetches_real_inputs_for_ticker(self, mock_margins, mock_inflation):
@@ -765,6 +779,19 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["railway_quality"], "strong")
         self.assertAlmostEqual(result["maintenance_capex_ratio"], 0.5)
 
+    @patch("industry_playbooks.OwnerEarnings.evaluate")
+    @patch("industry_playbooks.fetch_deep_financials")
+    @patch("industry_playbooks.yf.Ticker")
+    def test_railways_does_not_divide_by_none_maintenance_capex(self, mock_ticker, mock_financials, mock_owner_earnings):
+        mock_ticker.return_value.info = {"operatingMargins": 0.40, "revenueGrowth": 0.02}
+        mock_financials.return_value = {"total_revenue": 1000.0}
+        mock_owner_earnings.return_value = {"total_capex": 100.0, "maintenance_capex_estimate": None}
+
+        result = Railways().evaluate(ticker="UNP")
+
+        self.assertAlmostEqual(result["maintenance_capex_ratio"], 1.0)
+        self.assertEqual(result["railway_quality"], "mixed")
+
     def test_technology_internet(self):
         result = TechnologyInternet().evaluate(
             recurring_revenue_ratio=0.75,
@@ -826,7 +853,9 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(kwargs["transcript"], "Transcript text")
         self.assertEqual(kwargs["proxy_stmt"], "Proxy text")
 
-    def test_management_evaluation_requires_cached_transcript(self):
+    @patch("management_governance.load_cached_transcript_text")
+    def test_management_evaluation_requires_cached_transcript(self, mock_load_cached):
+        mock_load_cached.return_value = ""
         with self.assertRaises(RuntimeError):
             ManagementEvaluation()._fetch_earnings_call_transcript("YUM")
 

@@ -1,3 +1,4 @@
+from cache_utils import disk_cache
 import os
 import json
 import time
@@ -225,6 +226,7 @@ def aggregate_panel_judgment(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+@disk_cache()
 def _call_single_ollama_model(
     prompt: str,
     model: str,

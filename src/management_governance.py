@@ -186,6 +186,19 @@ class ManagementEvaluation:
         transcript_text = load_cached_transcript_text(ticker)
         if transcript_text:
             return transcript_text
+        # Instead of crashing the whole pipeline, let's trigger the fetch directly
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"  -> [ManagementGovernance] No cached earnings call transcripts found for {ticker}. Auto-fetching now via earnings call API...")
+        try:
+            from earnings_calls import fetch_transcripts_for_ticker
+            fetch_transcripts_for_ticker(ticker, limit=4)
+            transcript_text = load_cached_transcript_text(ticker)
+            if transcript_text:
+                return transcript_text
+        except Exception as e:
+            logger.error(f"  -> [ManagementGovernance] Failed to auto-fetch transcripts: {e}")
+            
         raise RuntimeError(
             f"No cached earnings call transcripts found for {ticker}. "
             "Run src/earnings_calls.py first to populate output/earnings_calls/."
@@ -219,7 +232,7 @@ class CorporateCulture:
                 restructurings_per_5y = culture_inputs["restructurings_per_5y"]
             
         if employee_turnover is None or insider_ownership is None or restructurings_per_5y is None:
-            raise ValueError("All metrics must be provided or fetchable via ticker")
+            return {"applicable": False, "reason": "Missing required metrics: All metrics must be provided or fetchable via ticker"}
 
         score = 0
         if employee_turnover <= CULTURE_EMPLOYEE_TURNOVER_MAX:
@@ -318,7 +331,7 @@ class AcquisitionLogicAcquisitionCriteria:
                 debt_funded = acquisition_inputs["debt_funded"]
             
         if purchase_multiple is None or return_on_invested_capital is None or debt_funded is None:
-            raise ValueError("All metrics must be provided or fetchable via ticker")
+            return {"applicable": False, "reason": "Missing required metrics: All metrics must be provided or fetchable via ticker"}
 
         score = 0
         if purchase_multiple <= ACQUISITION_PURCHASE_MULTIPLE_MAX:
