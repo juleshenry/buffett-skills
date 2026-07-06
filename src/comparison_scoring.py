@@ -521,6 +521,13 @@ def _evidence_profile(source_path: str) -> tuple[str, float]:
         "valuation_capital.ShareBuybackAnalysis",
         "valuation_capital.CapitalAllocationAnalysis.buyback_analysis",
         "risk_behavior.LeverageRisk",
+        # OwnerEarnings pulls net_income/total_capex/D&A straight from
+        # yfinance (data-backed), but maintenance_capex_estimate and
+        # owner_earnings both depend on the Ollama panel's maintenance-vs-
+        # growth capex split (_query_ollama_capex_breakdown) -- tag only
+        # those two derived fields, not the whole class, as panel-derived.
+        "financial_metrics.OwnerEarnings.maintenance_capex_estimate",
+        "financial_metrics.OwnerEarnings.owner_earnings",
     )
 
     if source_path.startswith(llm_text_prefixes):
@@ -674,15 +681,35 @@ def _apply_peer_normalization(metrics: list[dict]) -> None:
         if not direction:
             continue
 
+        # Prefer the most specific bucket (industry > sector > all) that
+        # already meets the reliability bar (MIN_PEER_GROUP_SIZE). Only if
+        # none of them do, fall back to the largest bucket with at least 2
+        # tickers. Without this, a company with 3-4 real same-industry peers
+        # gets stuck comparing against just those few (and gets flagged
+        # "weak"), while a company with *zero* industry peers sails past it
+        # into a much bigger, non-warning sector bucket -- i.e. having more
+        # relevant peers than another can otherwise produce a worse-rated
+        # comparison than having none at all.
         items = None
         selected_bucket = None
+        best_fallback_items = None
+        best_fallback_bucket = None
         for bucket in _candidate_normalization_buckets(metric):
             bucket_items = grouped.get(bucket, [])
             unique_tickers = {item.get("ticker") for item in bucket_items}
-            if len(unique_tickers) >= 2:
+            if len(unique_tickers) >= MIN_PEER_GROUP_SIZE:
                 items = bucket_items
                 selected_bucket = bucket
                 break
+            if len(unique_tickers) >= 2:
+                best_fallback_size = len({item.get("ticker") for item in best_fallback_items}) if best_fallback_items else 0
+                if len(unique_tickers) > best_fallback_size:
+                    best_fallback_items = bucket_items
+                    best_fallback_bucket = bucket
+
+        if items is None:
+            items = best_fallback_items
+            selected_bucket = best_fallback_bucket
 
         if not items:
             continue

@@ -1,0 +1,16 @@
+  (memory tight: 34173 free pages < 65536, waiting 10s...)
+  (memory tight: 35303 free pages < 65536, waiting 10s...)
+  (memory tight: 33405 free pages < 65536, waiting 10s...)
+  (memory tight: 33207 free pages < 65536, waiting 10s...)
+  (memory tight: 27744 free pages < 65536, waiting 10s...)
+  (memory tight: 27696 free pages < 65536, waiting 10s...)
+  (memory tight: 31210 free pages < 65536, waiting 10s...)
+  (memory tight: 34228 free pages < 65536, waiting 10s...)
+  (memory tight: 34018 free pages < 65536, waiting 10s...)
+  (memory tight: 30077 free pages < 65536, waiting 10s...)
+  (memory tight: 31063 free pages < 65536, waiting 10s...)
+  (memory tight: 31516 free pages < 65536, waiting 10s...)
+  (memory still tight after 120s wait: 35112 free pages; proceeding cautiously)
+=== [CFG] attempt 1/3 ===
+[CFG] OK (clean)
+=== [CAG] attempt 1/3 ===

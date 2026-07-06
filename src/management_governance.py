@@ -7,7 +7,13 @@ from typing import Dict, Any, Optional
 import yfinance as yf
 from transformers import pipeline
 from earnings_calls import load_cached_transcript_text
-from evaluator_config import DEFAULT_OLLAMA_HOST, DEFAULT_OLLAMA_MODEL, call_ollama_panel_json, call_ollama_panel_text
+from evaluator_config import (
+    DEFAULT_OLLAMA_HOST,
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE,
+    call_ollama_panel_json,
+    call_ollama_panel_text,
+)
 from evaluator_thresholds import (
     ACQUISITION_PURCHASE_MULTIPLE_MAX,
     ACQUISITION_ROIC_MIN,
@@ -53,10 +59,11 @@ class ManagementGovernanceAnalyzer:
 
     def _call_ollama(self, prompt: str, json_format: bool = True, timeout: int = 45) -> Dict[str, Any]:
         """Calls local Ollama API using standard library with timeouts and robust JSON parsing."""
+        options = {"temperature": DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE}
         try:
             if json_format:
-                return call_ollama_panel_json(prompt, model=self.ollama_model, timeout=timeout, host=self.ollama_host)
-            return call_ollama_panel_text(prompt, model=self.ollama_model, timeout=timeout, host=self.ollama_host)
+                return call_ollama_panel_json(prompt, model=self.ollama_model, timeout=timeout, host=self.ollama_host, options=options)
+            return call_ollama_panel_text(prompt, model=self.ollama_model, timeout=timeout, host=self.ollama_host, options=options)
         except Exception as e:
             return {"error": f"Unexpected error: {str(e)}"}
 
@@ -176,10 +183,11 @@ class ManagementEvaluation:
         return result.get("response", "Analysis failed.")
 
     def _call_ollama(self, prompt: str, json_format: bool = True, timeout: int = 45) -> dict:
+        options = {"temperature": DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE}
         try:
             if json_format:
-                return call_ollama_panel_json(prompt, model=self.ollama_model, timeout=timeout, host=self.ollama_host)
-            return call_ollama_panel_text(prompt, model=self.ollama_model, timeout=timeout, host=self.ollama_host)
+                return call_ollama_panel_json(prompt, model=self.ollama_model, timeout=timeout, host=self.ollama_host, options=options)
+            return call_ollama_panel_text(prompt, model=self.ollama_model, timeout=timeout, host=self.ollama_host, options=options)
         except Exception as e:
             return {"error": str(e), "response": f"Error connecting to Ollama: {e}"}
 

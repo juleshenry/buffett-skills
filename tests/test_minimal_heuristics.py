@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../s
 
 from financial_metrics import KeyFinancialMetrics
 from financial_metrics import LookthroughEarningsPrinciple
-from business_moat import BusinessModelTypes, TheDurabilityOfCompetitiveAdvantage
+from business_moat import BusinessModelTypes, EconomicMoat, TheDurabilityOfCompetitiveAdvantage
 from business_moat import GoodwillEconomicGoodwillVsAccountingGoodwill
 from investment_philosophy import IntrinsicValue, UndervaluedMarginOfSafety
 from management_governance import CorporateGovernanceAndShareholderOrientation
@@ -17,7 +17,7 @@ from management_governance import AcquisitionLogicAcquisitionCriteria, Corporate
 from thinking_frameworks import MrMarket
 from valuation_capital import CapitalAllocationAnalysis, MarginOfSafety, TheRelationshipBetweenPurchasePriceAndIntrinsicValue
 from valuation_capital import DividendsRetainedEarningsAndTaxEfficiency
-from valuation_capital import SpecialInvestmentInstruments
+from valuation_capital import ShareBuybackAnalysis, SpecialInvestmentInstruments
 from evaluator_config import (
     DEFAULT_INTRINSIC_VALUE_YEARS,
     _resolve_ollama_model,
@@ -145,12 +145,24 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
 
         self.assertTrue(result["inside_circle"])
-        self.assertEqual(mock_sleep.call_count, 1)
+        self.assertEqual(mock_sleep.call_count, 2)
 
     def test_margin_of_safety(self):
         result = MarginOfSafety().evaluate(intrinsic_value=100.0, market_price=70.0)
         self.assertAlmostEqual(result["margin_of_safety"], 0.30)
         self.assertTrue(result["is_discount"])
+
+    def test_margin_of_safety_handles_negative_intrinsic_value(self):
+        # Real, observed case: companies in a heavy growth-capex phase can
+        # have genuinely negative recent FCF (APD -$3.5B, AES -$3.0B), which
+        # produces a nonsensical negative DCF "intrinsic value." This must
+        # return the same "not applicable" shape every other evaluator uses
+        # for missing/inapplicable data, not raise ValueError.
+        result = MarginOfSafety().evaluate(intrinsic_value=-413.12, market_price=160.44)
+        self.assertEqual(
+            result,
+            {"applicable": False, "reason": "Computed intrinsic value is not positive (likely driven by negative free cash flow); margin of safety is not meaningful here"},
+        )
 
     def test_purchase_price_relationship(self):
         result = TheRelationshipBetweenPurchasePriceAndIntrinsicValue().evaluate(
@@ -159,6 +171,13 @@ class TestMinimalHeuristics(unittest.TestCase):
         )
         self.assertAlmostEqual(result["margin_of_safety"], 0.28)
         self.assertEqual(result["purchase_price_verdict"], "deep_discount")
+
+    def test_purchase_price_relationship_handles_negative_intrinsic_value(self):
+        result = TheRelationshipBetweenPurchasePriceAndIntrinsicValue().evaluate(
+            intrinsic_value=-413.12,
+            market_price=160.44,
+        )
+        self.assertEqual(result, {"applicable": False, "reason": "Computed intrinsic value is not positive (likely driven by negative free cash flow); margin of safety is not meaningful here"})
 
     def test_value_trap_screen(self):
         result = ValueTraps().evaluate(
@@ -183,6 +202,23 @@ class TestMinimalHeuristics(unittest.TestCase):
         result = ValueTraps().evaluate(ticker="AAPL")
         self.assertTrue(result["is_value_trap"])
         mock_fetch_metrics.assert_called_once_with("AAPL")
+
+    @patch("risk_behavior.fetch_earnings_call_risk_commentary")
+    def test_value_traps_adds_transcript_risk_flags(self, mock_risk_commentary):
+        mock_risk_commentary.return_value = "Management called demand challenging and discussed debt refinancing needs."
+
+        result = ValueTraps().evaluate(
+            pe_ratio=8.0,
+            revenue_growth=-0.03,
+            free_cash_flow_growth=-0.10,
+            debt_to_equity=1.4,
+            return_on_capital=0.05,
+            ticker="AAPL",
+        )
+
+        self.assertIn("management_flags_headwinds", result["risk_flags"])
+        self.assertIn("management_flags_balance_sheet_risk", result["risk_flags"])
+        self.assertIn("earnings_call_risk_commentary", result)
 
     def test_when_to_sell(self):
         result = WhenToSellPrinciple().evaluate(
@@ -260,6 +296,18 @@ class TestMinimalHeuristics(unittest.TestCase):
 
         mock_evaluate.assert_called_once_with("AAPL")
         self.assertEqual(result["buyback_analysis"]["buyback_strategy"], "Opportunistic/Value-Based")
+
+    @patch("valuation_capital.load_cached_transcript_keyword_context")
+    @patch("valuation_capital.fetch_filing_section")
+    def test_fetch_management_commentary_merges_sec_and_earnings_call_context(self, mock_fetch_section, mock_transcript_context):
+        mock_fetch_section.return_value = "SEC MD&A discusses capital allocation and buybacks."
+        mock_transcript_context.return_value = "On the call, management discussed acquisitions and repurchases."
+
+        result = valuation_capital.fetch_management_commentary.__wrapped__("YUM")
+
+        self.assertIn("SEC commentary", result)
+        self.assertIn("Earnings call commentary", result)
+        self.assertIn("acquisitions and repurchases", result)
 
     @patch("valuation_capital.ShareBuybackAnalysis.evaluate")
     def test_capital_allocation_analysis_prefers_provided_commentary(self, mock_evaluate):
@@ -366,6 +414,23 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["durability_assessment"], "strong")
         mock_fetch_metrics.assert_called_once_with("AAPL")
 
+    @patch("business_moat.call_ollama_panel_json")
+    @patch("business_moat.fetch_moat_commentary")
+    @patch("sec_data.fetch_filing_section")
+    def test_economic_moat_includes_earnings_call_commentary_when_available(self, mock_fetch_section, mock_fetch_moat_commentary, mock_panel):
+        mock_fetch_section.return_value = "A software platform with sticky enterprise workflows."
+        mock_fetch_moat_commentary.return_value = "Management cited pricing power, customer retention, and competitive wins."
+        mock_panel.return_value = {
+            "moat_type": "Switching Costs",
+            "justification": "Sticky workflows create friction. Retention supports durability.",
+        }
+
+        EconomicMoat().evaluate("AAPL")
+
+        prompt = mock_panel.call_args.args[0]
+        self.assertIn("Relevant Earnings Call Commentary", prompt)
+        self.assertIn("pricing power", prompt)
+
     def test_focus_investing(self):
         result = FocusInvestingPrinciple().evaluate([40.0, 25.0, 15.0, 10.0, 10.0])
         self.assertEqual(result["position_count"], 5)
@@ -404,6 +469,22 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertTrue(result["is_undervalued"])
         mock_intrinsic.assert_called_once_with(ticker="AAPL")
 
+    @patch("investment_philosophy.IntrinsicValue.evaluate")
+    def test_undervalued_margin_of_safety_handles_negative_intrinsic_value(self, mock_intrinsic):
+        mock_intrinsic.return_value = {"intrinsic_value_per_share": -413.12, "market_price": 160.44}
+        result = UndervaluedMarginOfSafety().evaluate(ticker="APD")
+        self.assertEqual(result, {"applicable": False, "reason": "Computed intrinsic value is not positive (likely driven by negative free cash flow); margin of safety is not meaningful here"})
+
+    @patch("investment_philosophy.IntrinsicValue.evaluate")
+    def test_undervalued_margin_of_safety_handles_inapplicable_intrinsic_value(self, mock_intrinsic):
+        # Banks/insurers: IntrinsicValue() itself returns {"applicable":
+        # False, ...} when FCF is None (JPM, BAC, C, BK, USB). Direct-
+        # indexing intrinsic_result["intrinsic_value_per_share"] would raise
+        # KeyError here; must fall through to the same clean shape instead.
+        mock_intrinsic.return_value = {"applicable": False, "reason": "Missing required metrics: fcf, growth_rate, discount_rate, shares_outstanding, and net_debt are required"}
+        result = UndervaluedMarginOfSafety().evaluate(ticker="JPM")
+        self.assertEqual(result, {"applicable": False, "reason": "Missing required metrics: intrinsic_value and market_price are required"})
+
     def test_intrinsic_value_wrapper(self):
         result = IntrinsicValue().evaluate(
             fcf=100.0,
@@ -423,6 +504,58 @@ class TestMinimalHeuristics(unittest.TestCase):
         result = IntrinsicValue().evaluate(ticker="AAPL")
         self.assertEqual(result["intrinsic_value_per_share"], 123.0)
         mock_estimate.assert_called_once_with(ticker="AAPL", terminal_growth_rate=0.02, years=DEFAULT_INTRINSIC_VALUE_YEARS)
+
+    @patch("valuation_capital.fetch_current_market_price")
+    @patch("valuation_capital.fetch_risk_free_rate")
+    @patch("valuation_capital.fetch_financial_data")
+    def test_intrinsic_value_estimation_handles_none_free_cash_flow(self, mock_financials, mock_risk_free, mock_market_price):
+        # Banks/insurers: yfinance's freeCashflow is routinely None for these
+        # (JPM, BAC, C, BK, USB all observed None). This must return the same
+        # clean "not applicable" shape every other evaluator uses for missing
+        # data, not raise float(None) -> TypeError.
+        mock_financials.return_value = {
+            "recent_free_cash_flow": None,
+            "historical_fcf_growth_rate": 0.05,
+            "shares_outstanding": 10,
+            "cash_and_equivalents": 20.0,
+            "total_debt": 50.0,
+        }
+        mock_risk_free.return_value = 0.04
+        mock_market_price.return_value = 80.0
+
+        result = valuation_capital.IntrinsicValueEstimation().evaluate(ticker="JPM")
+
+        self.assertEqual(result, {"applicable": False, "reason": "Missing required metrics: fcf, growth_rate, discount_rate, shares_outstanding, and net_debt are required"})
+
+    @patch("valuation_capital.fetch_current_market_price")
+    @patch("valuation_capital.fetch_risk_free_rate")
+    @patch("valuation_capital.fetch_financial_data")
+    def test_margin_of_safety_handles_inapplicable_intrinsic_value(self, mock_financials, mock_risk_free, mock_market_price):
+        mock_financials.return_value = {
+            "recent_free_cash_flow": None,
+            "historical_fcf_growth_rate": 0.05,
+            "shares_outstanding": 10,
+            "cash_and_equivalents": 20.0,
+            "total_debt": 50.0,
+        }
+        mock_risk_free.return_value = 0.04
+        mock_market_price.return_value = 80.0
+
+        result = MarginOfSafety().evaluate(ticker="JPM")
+
+        self.assertEqual(result, {"applicable": False, "reason": "Missing required metrics: intrinsic_value and market_price are required"})
+
+    @patch("valuation_capital.fetch_financial_data")
+    def test_capital_allocation_analysis_handles_none_free_cash_flow(self, mock_financials):
+        mock_financials.return_value = {
+            "recent_free_cash_flow": None,
+            "total_debt": 800.0,
+            "cash_and_equivalents": 500.0,
+        }
+
+        result = CapitalAllocationAnalysis().evaluate(ticker="JPM")
+
+        self.assertEqual(result, {"applicable": False, "reason": "Missing required metrics: recent_free_cash_flow, total_debt, and cash_and_equivalents are required"})
 
     @patch("valuation_capital.fetch_current_market_price")
     @patch("valuation_capital.fetch_risk_free_rate")
@@ -883,8 +1016,24 @@ class TestMinimalHeuristics(unittest.TestCase):
     @patch("valuation_capital.fetch_filing_keyword_context")
     def test_fetch_management_commentary_prefers_sec_keyword_context(self, mock_fetch_context):
         mock_fetch_context.return_value = "The company repurchased shares opportunistically."
-        result = valuation_capital.fetch_management_commentary("YUM")
+        result = valuation_capital.fetch_management_commentary.__wrapped__("YUM")
         self.assertIn("repurchased shares", result)
+
+    @patch("valuation_capital.fetch_management_commentary")
+    @patch("valuation_capital.call_ollama_panel_json")
+    def test_share_buyback_analysis_uses_combined_management_commentary(self, mock_panel, mock_fetch_commentary):
+        mock_fetch_commentary.return_value = "SEC commentary: buybacks. Earnings call commentary: intrinsic value repurchases."
+        mock_panel.return_value = {
+            "buyback_strategy": "Opportunistic/Value-Based",
+            "mentions_intrinsic_value": True,
+            "analysis_summary": "Management ties repurchases to value.",
+        }
+
+        result = ShareBuybackAnalysis().evaluate("YUM")
+
+        self.assertTrue(result["mentions_intrinsic_value"])
+        prompt = mock_panel.call_args.args[0]
+        self.assertIn("Earnings call commentary", prompt)
 
     def test_extract_keyword_context_returns_real_snippets(self):
         text = "Alpha. The company expanded its share repurchase program materially this quarter. Omega."
@@ -902,6 +1051,22 @@ class TestMinimalHeuristics(unittest.TestCase):
         mock_fetch.return_value = "Leases and pension disclosures"
         result = LeverageRisk()._fetch_sec_10k_footnotes("YUM")
         self.assertEqual(result, "Leases and pension disclosures")
+
+    @patch("risk_behavior.fetch_earnings_call_risk_commentary")
+    @patch("risk_behavior._extract_footnote_risk_signals")
+    @patch("risk_behavior.fetch_sec_10k_footnotes")
+    def test_leverage_risk_attaches_earnings_call_context_to_deterministic_result(self, mock_fetch_footnotes, mock_extract_signals, mock_risk_commentary):
+        mock_fetch_footnotes.return_value = "Footnotes"
+        mock_risk_commentary.return_value = "Management discussed refinancing risk."
+        mock_extract_signals.return_value = {
+            "operating_lease_obligations": "$500 million",
+            "pension_underfunding": "Not found",
+            "toxic_derivative_exposure": "None mentioned",
+        }
+
+        result = LeverageRisk().evaluate("YUM")
+
+        self.assertEqual(result["earnings_call_risk_commentary"], "Management discussed refinancing risk.")
 
     @patch("financial_metrics.fetch_mda_section")
     def test_owner_earnings_uses_real_mda_fetcher(self, mock_fetch_mda):
@@ -942,6 +1107,34 @@ class TestMinimalHeuristics(unittest.TestCase):
         result = MrMarket().evaluate("AOS")
         self.assertEqual(result["mr_market_mood"], "fear")
         self.assertLess(result["drawdown_from_high"], -0.20)
+
+    @patch("valuation_capital.yf.Ticker")
+    def test_fetch_financial_data_uses_full_history_cagr_not_single_year(self, mock_ticker):
+        # FCF was flat for 3 years then jumped in the most recent year. A
+        # naive single-year-over-year comparison (old behavior) reads this
+        # as +30% -> capped to 15%, extrapolating one lucky year across the
+        # entire DCF horizon. Real example that motivated this: AOS's FCF
+        # was 321.1/597.7/473.8/546.0 across 2022-2025 -- any single
+        # adjacent-year pair swings from -21% to +86%. The full-history CAGR
+        # is a much more modest ~9% here, which is what should actually
+        # drive the growth assumption.
+        dates = pd.to_datetime(["2025-12-31", "2024-12-31", "2023-12-31", "2022-12-31"])
+        cashflow = pd.DataFrame(
+            {dates[0]: [130.0], dates[1]: [100.0], dates[2]: [100.0], dates[3]: [100.0]},
+            index=["Free Cash Flow"],
+        )
+        mock_ticker.return_value.cashflow = cashflow
+        mock_ticker.return_value.info = {
+            "sharesOutstanding": 10_000_000,
+            "totalCash": 50.0,
+            "totalDebt": 20.0,
+        }
+
+        financials = valuation_capital.fetch_financial_data("TEST")
+
+        expected_growth = (130.0 / 100.0) ** (1 / 3) - 1
+        self.assertAlmostEqual(financials["historical_fcf_growth_rate"], expected_growth, places=6)
+        self.assertLess(financials["historical_fcf_growth_rate"], 0.15)
 
 
 if __name__ == "__main__":

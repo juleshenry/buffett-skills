@@ -3,8 +3,34 @@ import json
 import re
 import requests
 import yfinance as yf
-from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL, call_ollama_panel_json
+from evaluator_config import (
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE,
+    OLLAMA_GENERATE_URL,
+    call_ollama_panel_json,
+)
 from sec_data import fetch_filing_keyword_context, fetch_filing_section
+
+
+def _coerce_percentage(value) -> float | None:
+    """Best-effort coercion of an LLM-returned percentage into a bare float.
+
+    Local panel models are told to "return ONLY JSON" with a float field but
+    routinely answer with strings like "62.8%" anyway. Strip the decoration
+    here, at the normalization boundary, so a formatting quirk in one judge's
+    response doesn't raise ValueError deep inside OwnerEarnings.evaluate().
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        match = re.search(r"-?\d+(?:\.\d+)?", value.replace(",", ""))
+        if match:
+            return float(match.group(0))
+    return None
 
 
 def normalize_capex_breakdown(result: dict | None) -> dict:
@@ -18,8 +44,8 @@ def normalize_capex_breakdown(result: dict | None) -> dict:
         growth_percentage = result.get("growth_capex_percentage")
 
     return {
-        "maintenance_percentage": maintenance_percentage,
-        "growth_percentage": growth_percentage,
+        "maintenance_percentage": _coerce_percentage(maintenance_percentage),
+        "growth_percentage": _coerce_percentage(growth_percentage),
         "maintenance_capex_amount": result.get("maintenance_capex_amount"),
         "reasoning": result.get("reasoning") or result.get("analysis") or "",
     }
@@ -97,7 +123,7 @@ def query_ollama_capex_breakdown(mda_text: str) -> dict:
     
     print("Querying Ollama for Capex breakdown...")
     try:
-        return normalize_capex_breakdown(call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL))
+        return normalize_capex_breakdown(call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL, options={"temperature": DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE}))
     except Exception as e:
         print(f"Error querying Ollama: {e}")
         return {}
@@ -339,7 +365,7 @@ class OwnerEarnings:
     def _query_ollama_capex_breakdown(self, mda_text: str) -> dict:
         prompt = f"""Read this MD&A and estimate what percentage of Capital Expenditures (Capex) was spent on 'Maintenance' vs 'Growth'. Return ONLY JSON: {{"maintenance_percentage": float, "growth_percentage": float, "maintenance_capex_amount": string, "reasoning": string}}. MD&A Text: {mda_text}"""
         try:
-            return normalize_capex_breakdown(call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL))
+            return normalize_capex_breakdown(call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL, options={"temperature": DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE}))
         except Exception:
             return {}
 

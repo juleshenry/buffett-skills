@@ -81,6 +81,18 @@ def get_ollama_panel_sleep_seconds() -> float:
         return 1.0
 
 
+def get_ollama_keep_alive_seconds() -> int:
+    """How long Ollama should keep a model loaded after answering a request.
+
+    Defaults to 0 (unload immediately) because this codebase always calls a
+    *panel* of models per judgment, and letting more than one multi-GB model
+    sit in memory at once is what has caused the shared local Ollama server
+    to OOM-crash. Override with OLLAMA_KEEP_ALIVE_SECONDS if you know you have
+    RAM to spare and want to skip the reload cost between calls.
+    """
+    return _get_int_env("OLLAMA_KEEP_ALIVE_SECONDS", 0)
+
+
 def _dedupe_preserve_order(values: list[str]) -> list[str]:
     seen = set()
     deduped = []
@@ -243,6 +255,15 @@ def _call_single_ollama_model(
         "model": model,
         "prompt": prompt,
         "stream": False,
+        # This machine (and the shared Ollama server on it) has been observed
+        # to OOM-crash when the panel's two models end up resident at once
+        # (each is a multi-GB weight set). "keep_alive": 0 tells Ollama to
+        # unload THIS model immediately once it has responded, so the next
+        # panel member always loads into a freed-up machine instead of
+        # stacking on top of the previous one. Costs a reload (~2-3s) per
+        # call; that's a fine trade for not crashing the shared server out
+        # from under whoever else is using it.
+        "keep_alive": get_ollama_keep_alive_seconds(),
     }
     if json_format:
         payload["format"] = "json"
@@ -351,6 +372,19 @@ DEFAULT_CIRCLE_OF_COMPETENCE_TEMPERATURE = _get_float_env(
     0.2,
 )
 DEFAULT_INVERSION_TEMPERATURE = _get_float_env("DEFAULT_INVERSION_TEMPERATURE", 0.3)
+# Every other panel call in this codebase (moat classification, capex-split
+# extraction, footnote/derivatives risk analysis, buyback-strategy reads,
+# management sentiment) is a structured extraction/classification task, not
+# open-ended writing, and none of them previously set an explicit
+# temperature -- meaning they ran at Ollama's model default (~0.7-0.8),
+# with no particular reason to reproduce the same judgment on a cold rerun
+# (post cache-expiry) even when the underlying filing text hasn't changed.
+# Reuse the low, low-variance temperature already proven out by
+# CircleOfCompetence for these too.
+DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE = _get_float_env(
+    "DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE",
+    0.2,
+)
 RISK_FREE_RATE_FALLBACK = _get_float_env("RISK_FREE_RATE_FALLBACK", 0.042)
 
 EARNINGSCALLS_API_BASE_URL = os.environ.get("EARNINGSCALLS_API_BASE_URL", "https://earningscalls.dev/api/v1").rstrip("/")

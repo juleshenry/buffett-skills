@@ -8,7 +8,12 @@ import yfinance as yf
 import pandas_datareader.data as web
 import datetime
 from typing import Dict, List, Any, Optional
-from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL, call_ollama_panel_json
+from evaluator_config import (
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE,
+    OLLAMA_GENERATE_URL,
+    call_ollama_panel_json,
+)
 from evaluator_thresholds import (
     BUSINESS_MODEL_ASSET_HEAVY_CAPITAL_INTENSITY_MIN,
     BUSINESS_MODEL_ASSET_HEAVY_GROSS_MARGIN_MAX,
@@ -22,6 +27,7 @@ from evaluator_thresholds import (
     INFLATION_MARGIN_CHANGE_FLOOR,
     INFLATION_SPIKE_RATE_MIN,
 )
+from earnings_calls import load_cached_transcript_keyword_context
 from thinking_frameworks import fetch_company_info
 from financial_metrics import fetch_deep_financials
 
@@ -153,11 +159,21 @@ def fetch_durability_metrics(ticker: str) -> dict:
 def _query_ollama_json(prompt: str, model: str = DEFAULT_MODEL) -> dict:
     """Helper function to query the local Ollama API and return parsed JSON."""
     try:
-        return call_ollama_panel_json(prompt, model=model)
+        return call_ollama_panel_json(prompt, model=model, options={"temperature": DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE})
     except Exception as e:
         logger.error(f"Network error communicating with Ollama: {e}")
     
     return {}
+
+
+def fetch_moat_commentary(ticker: str) -> str:
+    return load_cached_transcript_keyword_context(
+        ticker,
+        keywords=("pricing", "price increase", "market share", "competition", "competitive", "retention"),
+        context_chars=1800,
+        max_matches=4,
+        max_chars=10000,
+    )
 
 @disk_cache()
 def fetch_historical_margins(ticker: str) -> pd.DataFrame:
@@ -417,10 +433,18 @@ class EconomicMoat:
             except Exception as e:
                 return {"moat_type": "Unknown", "justification": f"Failed to fetch SEC description: {e}"}
 
+        transcript_context = ""
+        try:
+            transcript_commentary = fetch_moat_commentary(ticker)
+            if transcript_commentary:
+                transcript_context = f"\n\nRelevant Earnings Call Commentary:\n{transcript_commentary}"
+        except Exception:
+            pass
+
         prompt = f"""
         You are an expert value investor analyzing {company_name}. 
 
-        {context_str}
+        {context_str}{transcript_context}
 
         Based on this information, classify the company's business moat into exactly one of these buckets: 
         - Brand
@@ -442,7 +466,7 @@ class EconomicMoat:
 
     def _query_ollama_json(self, prompt: str, model: str) -> dict:
         try:
-            return call_ollama_panel_json(prompt, model=model)
+            return call_ollama_panel_json(prompt, model=model, options={"temperature": DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE})
         except Exception:
             return {}
 
@@ -468,7 +492,7 @@ class BusinessModelTypes:
                     business_desc = fetch_filing_section(ticker, form="10-K", start_markers=("item 1. business", "item 1.business"), end_markers=("item 1a", "risk factors"), max_chars=8000)
                     if business_desc:
                         prompt = f"Estimate the recurring revenue ratio (0.0 to 1.0) for this business based on its description. Return ONLY JSON: {{\"recurring_revenue_ratio\": float or null}}. Text: {business_desc[:3000]}"
-                        res = call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL)
+                        res = call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL, options={"temperature": DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE})
                         recurring_revenue_ratio = res.get("recurring_revenue_ratio")
                 except Exception:
                     pass

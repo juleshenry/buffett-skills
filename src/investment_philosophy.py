@@ -108,13 +108,23 @@ class UndervaluedMarginOfSafety:
     ) -> dict:
         if ticker and (intrinsic_value is None or market_price is None):
             intrinsic_result = IntrinsicValue().evaluate(ticker=ticker)
-            intrinsic_value = intrinsic_result["intrinsic_value_per_share"]
-            market_price = intrinsic_result["market_price"]
+            # .get(), not direct indexing: IntrinsicValue() can itself return
+            # {"applicable": False, ...} (e.g. banks/insurers with no
+            # reported free cash flow), which has neither key. Falling
+            # through to the None-check below is the correct behavior, not
+            # a KeyError.
+            intrinsic_value = intrinsic_result.get("intrinsic_value_per_share")
+            market_price = intrinsic_result.get("market_price")
 
         if intrinsic_value is None or market_price is None:
             return {"applicable": False, "reason": "Missing required metrics: intrinsic_value and market_price are required"}
 
         result = MarginOfSafety().evaluate(intrinsic_value, market_price)
+        if "margin_of_safety" not in result:
+            # MarginOfSafety() itself found the inputs inapplicable (e.g.
+            # intrinsic_value <= 0 from negative FCF) -- propagate that
+            # clean shape instead of crashing on the missing key.
+            return result
         result["minimum_margin"] = minimum_margin
         result["is_undervalued"] = result["margin_of_safety"] >= minimum_margin
         return result

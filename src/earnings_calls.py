@@ -6,6 +6,7 @@ from typing import Any
 import requests
 
 from evaluator_config import EARNINGSCALLS_API_BASE_URL, EARNINGSCALLS_API_KEY
+from sec_data import extract_keyword_context
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -169,6 +170,28 @@ def load_cached_transcript_text(ticker: str, limit: int = DEFAULT_CALLS_PER_TICK
             call_sections.append(f"{event_date} | {title}\n\n{transcript_text}")
 
     return "\n\n====\n\n".join(call_sections)
+
+
+def load_cached_transcript_keyword_context(
+    ticker: str,
+    keywords: tuple[str, ...] | list[str],
+    *,
+    limit: int = DEFAULT_CALLS_PER_TICKER,
+    context_chars: int = 1200,
+    max_matches: int = 4,
+    max_chars: int | None = 12000,
+) -> str:
+    transcript_text = load_cached_transcript_text(ticker, limit=limit)
+    if not transcript_text:
+        return ""
+
+    return extract_keyword_context(
+        transcript_text,
+        keywords=keywords,
+        context_chars=context_chars,
+        max_matches=max_matches,
+        max_chars=max_chars,
+    )
 
 
 def fetch_recent_calls_for_sp500(force_refresh: bool = False) -> dict[str, Any]:

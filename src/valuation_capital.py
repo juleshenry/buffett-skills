@@ -4,7 +4,15 @@ import re
 import requests
 import yfinance as yf
 from typing import Dict, Any, List, Optional
-from evaluator_config import DEFAULT_INTRINSIC_VALUE_YEARS, DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL, RISK_FREE_RATE_FALLBACK, call_ollama_panel_json
+from earnings_calls import load_cached_transcript_keyword_context
+from evaluator_config import (
+    DEFAULT_INTRINSIC_VALUE_YEARS,
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE,
+    OLLAMA_GENERATE_URL,
+    RISK_FREE_RATE_FALLBACK,
+    call_ollama_panel_json,
+)
 from sec_data import fetch_filing_keyword_context, fetch_filing_section
 from evaluator_thresholds import (
     CAPITAL_ALLOCATION_STRONG_FCF_TO_DEBT_MIN,
@@ -14,6 +22,18 @@ from evaluator_thresholds import (
     SPECIAL_INSTRUMENT_CONVERSION_DISCOUNT_MIN,
     SPECIAL_INSTRUMENT_COUPON_RATE_MIN,
 )
+
+
+def _optional_float(value) -> Optional[float]:
+    # yfinance returns freeCashflow=None for most banks/insurers (their cash
+    # flow statement doesn't map to the same field), which used to blow up
+    # here as a raw `float(None)` TypeError -- caught only by run.py's outer
+    # per-evaluator try/except, surfacing as an opaque {"error": "float() ..."}
+    # instead of the {"applicable": False, "reason": ...} shape every other
+    # evaluator in this file uses for "not enough data". This keeps the cast
+    # None-safe so the explicit check a few lines below every caller can
+    # actually run and produce that same clean shape.
+    return None if value is None else float(value)
 
 
 def normalize_buyback_analysis(result: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -78,9 +98,17 @@ def fetch_financial_data(ticker_symbol: str) -> Dict[str, Any]:
         elif not fcfs.empty:
             recent_fcf = fcfs.iloc[0]
             if len(fcfs) >= 2:
-                prev_fcf = fcfs.iloc[1]
-                if prev_fcf > 0 and recent_fcf > 0:
-                    calculated_growth = (recent_fcf / prev_fcf) - 1
+                # Use the full available history as a CAGR, not just the two
+                # most recent years. FCF is lumpy (working capital timing,
+                # capex swings), so a single year-over-year comparison can
+                # land on either an unusually strong or weak pair of years
+                # and project that noise forward for the entire DCF horizon.
+                # e.g. AOS: 2022->2023 +86%, 2023->2024 -21%, 2024->2025
+                # +15% -- any single adjacent pair is a poor proxy for trend.
+                oldest_fcf = fcfs.iloc[-1]
+                num_periods = len(fcfs) - 1
+                if oldest_fcf > 0 and recent_fcf > 0:
+                    calculated_growth = (recent_fcf / oldest_fcf) ** (1 / num_periods) - 1
                     # Cap growth rate between 2% and 15% for safer DCF projections
                     fcf_growth = max(0.02, min(calculated_growth, 0.15))
             fcf = recent_fcf
@@ -170,6 +198,8 @@ def fetch_management_commentary(ticker_symbol: str) -> str:
         ("8-K", ("share repurchase", "earnings release", "results of operations and financial condition", "capital allocation")),
     )
 
+    sec_commentary = ""
+
     for form, keywords in keyword_sets:
         try:
             commentary = fetch_filing_keyword_context(
@@ -181,20 +211,37 @@ def fetch_management_commentary(ticker_symbol: str) -> str:
                 max_chars=8000,
             )
             if commentary:
-                return commentary
+                sec_commentary = commentary
+                break
         except Exception:
             continue
 
-    try:
-        return fetch_filing_section(
-            ticker_symbol,
-            form="10-K",
-            start_markers=("item 7.", "management's discussion and analysis", "management s discussion and analysis"),
-            end_markers=("item 7a.", "item 8."),
-            max_chars=12000,
-        )
-    except Exception:
-        return "No SEC management commentary available."
+    if not sec_commentary:
+        try:
+            sec_commentary = fetch_filing_section(
+                ticker_symbol,
+                form="10-K",
+                start_markers=("item 7.", "management's discussion and analysis", "management s discussion and analysis"),
+                end_markers=("item 7a.", "item 8."),
+                max_chars=12000,
+            )
+        except Exception:
+            sec_commentary = ""
+
+    transcript_commentary = load_cached_transcript_keyword_context(
+        ticker_symbol,
+        keywords=("buyback", "repurchase", "share repurchase", "acquisition", "capital allocation", "returned to shareholders"),
+        context_chars=1800,
+        max_matches=4,
+        max_chars=8000,
+    )
+    if sec_commentary and transcript_commentary:
+        return f"SEC commentary:\n{sec_commentary}\n\nEarnings call commentary:\n{transcript_commentary}"
+    if sec_commentary:
+        return sec_commentary
+    if transcript_commentary:
+        return transcript_commentary
+    return "No SEC management commentary available."
 
 
 @disk_cache()
@@ -379,7 +426,7 @@ def analyze_buyback_commentary(ticker: str, commentary: str) -> Dict[str, Any]:
     """
     
     try:
-        return normalize_buyback_analysis(call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL))
+        return normalize_buyback_analysis(call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL, options={"temperature": DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE}))
     except Exception as e:
         print(f"Error querying Ollama: {e}")
         return normalize_buyback_analysis({
@@ -469,11 +516,13 @@ class IntrinsicValueEstimation:
         if ticker and any(value is None for value in (fcf, growth_rate, discount_rate, shares_outstanding, net_debt)):
             financials = fetch_financial_data(ticker)
             risk_free_rate = fetch_risk_free_rate()
-            fcf = float(financials["recent_free_cash_flow"])
-            growth_rate = float(financials["historical_fcf_growth_rate"])
+            fcf = _optional_float(financials["recent_free_cash_flow"])
+            growth_rate = _optional_float(financials["historical_fcf_growth_rate"])
             discount_rate = max(risk_free_rate + 0.05, 0.09)
-            shares_outstanding = int(financials["shares_outstanding"])
-            net_debt = float(financials["total_debt"] - financials["cash_and_equivalents"])
+            shares_outstanding = int(financials["shares_outstanding"]) if financials["shares_outstanding"] is not None else None
+            total_debt = _optional_float(financials["total_debt"])
+            cash_and_equivalents = _optional_float(financials["cash_and_equivalents"])
+            net_debt = None if total_debt is None or cash_and_equivalents is None else total_debt - cash_and_equivalents
             current_market_price = fetch_current_market_price(ticker)
 
         if any(value is None for value in (fcf, growth_rate, discount_rate, shares_outstanding, net_debt)):
@@ -693,16 +742,23 @@ class MarginOfSafety:
     ) -> dict:
         if ticker and (intrinsic_value is None or market_price is None):
             intrinsic_result = IntrinsicValueEstimation().evaluate(ticker=ticker)
-            intrinsic_value = intrinsic_result["intrinsic_value_per_share"]
+            intrinsic_value = intrinsic_result.get("intrinsic_value_per_share")
             market_price = intrinsic_result.get("market_price") or fetch_current_market_price(ticker)
 
         if intrinsic_value is None or market_price is None:
             return {"applicable": False, "reason": "Missing required metrics: intrinsic_value and market_price are required"}
 
         if intrinsic_value <= 0:
-            raise ValueError("intrinsic_value must be positive")
+            # Real, observed case (not hypothetical): companies in a heavy
+            # growth-capex phase can have genuinely negative recent FCF
+            # (e.g. APD -$3.5B, AES -$3.0B -- large capital projects).  A
+            # DCF run on a negative base cash flow produces a nonsensical
+            # negative "intrinsic value," and margin of safety isn't a
+            # meaningful concept to apply to that -- same "not applicable"
+            # treatment as a missing input, not a crash.
+            return {"applicable": False, "reason": "Computed intrinsic value is not positive (likely driven by negative free cash flow); margin of safety is not meaningful here"}
         if market_price <= 0:
-            raise ValueError("market_price must be positive")
+            return {"applicable": False, "reason": "Market price is not positive"}
 
         # Standard Graham/Buffett margin of safety: the discount to intrinsic
         # value, expressed as a fraction OF intrinsic value. This is the
@@ -744,13 +800,16 @@ class TheRelationshipBetweenPurchasePriceAndIntrinsicValue:
     ) -> dict:
         if ticker and (intrinsic_value is None or market_price is None):
             mos = MarginOfSafety().evaluate(ticker=ticker)
-            intrinsic_value = mos["intrinsic_value"]
-            market_price = mos["market_price"]
+            intrinsic_value = mos.get("intrinsic_value")
+            market_price = mos.get("market_price")
 
         if intrinsic_value is None or market_price is None:
             return {"applicable": False, "reason": "Missing required metrics: intrinsic_value and market_price are required"}
 
-        margin = MarginOfSafety().evaluate(intrinsic_value, market_price)["margin_of_safety"]
+        mos_result = MarginOfSafety().evaluate(intrinsic_value, market_price)
+        if "margin_of_safety" not in mos_result:
+            return mos_result
+        margin = mos_result["margin_of_safety"]
 
         verdict = "fairly_priced"
         if margin >= DEEP_DISCOUNT_MARGIN_MIN:
@@ -790,9 +849,9 @@ class CapitalAllocationAnalysis:
     ) -> dict:
         if ticker and any(value is None for value in (recent_free_cash_flow, total_debt, cash_and_equivalents)):
             financials = fetch_financial_data(ticker)
-            recent_free_cash_flow = float(financials["recent_free_cash_flow"])
-            total_debt = float(financials["total_debt"])
-            cash_and_equivalents = float(financials["cash_and_equivalents"])
+            recent_free_cash_flow = _optional_float(financials["recent_free_cash_flow"])
+            total_debt = _optional_float(financials["total_debt"])
+            cash_and_equivalents = _optional_float(financials["cash_and_equivalents"])
 
         if recent_free_cash_flow is None or total_debt is None or cash_and_equivalents is None:
             return {"applicable": False, "reason": "Missing required metrics: recent_free_cash_flow, total_debt, and cash_and_equivalents are required"}
@@ -841,15 +900,8 @@ class ShareBuybackAnalysis:
 
     def evaluate(self, ticker: str, commentary: str = "") -> dict:
         if not commentary:
-            from sec_data import fetch_filing_section
             try:
-                commentary = fetch_filing_section(
-                    ticker,
-                    form="10-K",
-                    start_markers=("item 7.", "management's discussion"),
-                    end_markers=("item 8.", "financial statements"),
-                    max_chars=15000
-                )
+                commentary = fetch_management_commentary(ticker)
             except Exception as e:
                 return normalize_buyback_analysis({"buyback_strategy": "Unknown", "mentions_intrinsic_value": False, "analysis_summary": f"Failed to fetch MD&A: {e}"})
 
@@ -867,7 +919,7 @@ class ShareBuybackAnalysis:
         - "analysis_summary": A one-sentence explanation.
         """
         try:
-            return normalize_buyback_analysis(call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL))
+            return normalize_buyback_analysis(call_ollama_panel_json(prompt, model=DEFAULT_OLLAMA_MODEL, options={"temperature": DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE}))
         except Exception as e:
             return normalize_buyback_analysis({"buyback_strategy": "Unknown", "mentions_intrinsic_value": False, "analysis_summary": f"Failed: {str(e)}"})
 

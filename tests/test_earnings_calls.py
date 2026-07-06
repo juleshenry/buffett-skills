@@ -88,6 +88,27 @@ class TestEarningsCalls(unittest.TestCase):
                 self.assertIn("CEO: Growth remained strong.", combined)
                 self.assertIn("Q2 Call", combined)
 
+    def test_load_cached_transcript_keyword_context_extracts_relevant_snippet(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir)
+            payload = [
+                {
+                    "event_date_time": "2025-07-01T00:00:00Z",
+                    "transcript_title": "Q3 Call",
+                    "transcript_text": "CEO: Pricing remained strong and retention improved despite competition.",
+                },
+            ]
+            (cache_dir / "AAPL.json").write_text(json.dumps(payload), encoding="utf-8")
+
+            with patch.object(earnings_calls, "CACHE_DIR", cache_dir):
+                excerpt = earnings_calls.load_cached_transcript_keyword_context(
+                    "AAPL",
+                    keywords=("pricing", "retention"),
+                    context_chars=80,
+                )
+                self.assertIn("Pricing remained strong", excerpt)
+                self.assertIn("retention improved", excerpt)
+
 
 if __name__ == "__main__":
     unittest.main()

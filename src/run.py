@@ -16,6 +16,7 @@ import management_governance
 import risk_behavior
 import thinking_frameworks
 import valuation_capital
+from earnings_calls import load_sp500_tickers
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -304,19 +305,90 @@ def analyze_company(ticker: str) -> dict:
     return results
 
 
+def _is_complete_analysis(output_filename: Path) -> bool:
+    """A file only counts as "done" if every top-level heuristic category
+    ran. analyze_company() writes incrementally (results[mod_name] = {} is
+    written *before* that category's evaluators run), so a hard crash
+    mid-run (observed: Ollama OOM-kills the whole process, not just one
+    request) leaves a real, parseable, but truncated JSON file on disk --
+    missing whichever categories hadn't started yet. Without this check,
+    run_continuous_all's resume-by-skip treats that file as finished
+    forever. A per-evaluator {"error": ...} is fine and expected; a missing
+    top-level category key is not.
+    """
+    try:
+        data = json.loads(output_filename.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return all(category in data for category in get_all_heuristic_classes())
+
+
+def run_continuous_all() -> None:
+    """
+    Runs the full 49-heuristic pipeline over every S&P 500 ticker, resuming
+    automatically: any ticker that already has a *complete*
+    output/<TICKER>_analysis.json is skipped, so re-running after a
+    crash/interrupt just picks up where it left off -- including redoing
+    any ticker whose file was left truncated by a mid-run crash. Failures
+    are logged and skipped per-ticker instead of aborting the whole run. No
+    cross-company comparison is built (not meaningful at 500-company scale)
+    -- use --compare-existing on a handful of tickers for that.
+    """
+    tickers = [ticker.upper() for ticker in load_sp500_tickers()]
+    total = len(tickers)
+    completed = 0
+    skipped = 0
+    failures: dict[str, str] = {}
+
+    for index, ticker_symbol in enumerate(tickers, start=1):
+        output_filename = OUTPUT_DIR / f"{ticker_symbol}_analysis.json"
+        if output_filename.exists() and _is_complete_analysis(output_filename):
+            skipped += 1
+            continue
+
+        logger.info(f"[{index}/{total}] Starting exhaustive 49-heuristic pipeline for {ticker_symbol}...")
+        try:
+            analyze_company(ticker_symbol)
+            completed += 1
+            logger.info(f"[{index}/{total}] Saved {output_filename}")
+        except Exception as e:
+            failures[ticker_symbol] = str(e)
+            logger.error(f"[{index}/{total}] Failed {ticker_symbol}: {e}")
+
+    logger.info(
+        f"continuous-all done: {completed} completed, {skipped} already cached, "
+        f"{len(failures)} failed, out of {total} total"
+    )
+    if failures:
+        logger.info(f"Failures: {json.dumps(failures, indent=2)}")
+
+
 def main(argv=None):
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("tickers", nargs="+")
+    parser.add_argument("tickers", nargs="*")
     parser.add_argument(
         "--compare-existing",
         action="store_true",
         help="Treat positional arguments as paths to existing *_analysis.json files and only build a comparison output.",
     )
+    parser.add_argument(
+        "--continuous-all",
+        action="store_true",
+        help="Run the full pipeline over every S&P 500 ticker (sp500_tickers.json), resuming "
+        "automatically by skipping tickers that already have an output/<TICKER>_analysis.json.",
+    )
     args = parser.parse_args(argv)
 
     OUTPUT_DIR.mkdir(exist_ok=True)
+
+    if args.continuous_all:
+        run_continuous_all()
+        return
+
+    if not args.tickers:
+        parser.error("tickers required unless --continuous-all is passed")
 
     if args.compare_existing:
         analyses = comparison_scoring.load_analysis_files(args.tickers)

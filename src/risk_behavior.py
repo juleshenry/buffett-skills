@@ -4,7 +4,13 @@ import re
 import requests
 from typing import Dict, Any, Optional
 import yfinance as yf
-from evaluator_config import DEFAULT_OLLAMA_MODEL, OLLAMA_GENERATE_URL, call_ollama_panel_json
+from earnings_calls import load_cached_transcript_keyword_context
+from evaluator_config import (
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE,
+    OLLAMA_GENERATE_URL,
+    call_ollama_panel_json,
+)
 from evaluator_thresholds import (
     DERIVATIVES_EXPOSURE_HIGH_MIN,
     DERIVATIVES_EXPOSURE_MODERATE_MIN,
@@ -56,6 +62,16 @@ def fetch_sec_10k_footnotes(ticker: str) -> str:
     except Exception as e:
         raise RuntimeError(f"Failed to fetch 10-K footnotes for {ticker}: {e}") from e
 
+
+def fetch_earnings_call_risk_commentary(ticker: str) -> str:
+    return load_cached_transcript_keyword_context(
+        ticker,
+        keywords=("headwind", "temporary", "challenging", "debt", "refinancing", "liquidity", "covenant"),
+        context_chars=1800,
+        max_matches=4,
+        max_chars=10000,
+    )
+
 def analyze_footnotes_with_ollama(footnotes_text: str) -> Optional[Dict[str, Any]]:
     """
     Feeds the footnotes to Ollama to act as a 'Footnote Detective'.
@@ -84,7 +100,7 @@ Respond ONLY with valid JSON. Do not include markdown formatting like ```json or
 """
 
     try:
-        result = call_ollama_panel_json(prompt, model=MODEL_NAME)
+        result = call_ollama_panel_json(prompt, model=MODEL_NAME, options={"temperature": DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE})
         return normalize_footnote_analysis(result)
     except requests.exceptions.RequestException as e:
         print(f"Error communicating with Ollama: {e}")
@@ -333,6 +349,7 @@ class ValueTraps:
             return {"applicable": False, "reason": "Missing required metrics: pe_ratio, revenue_growth, free_cash_flow_growth, debt_to_equity, and return_on_capital are required"}
 
         flags = []
+        transcript_commentary = ""
 
         if pe_ratio <= VALUE_TRAP_PE_RATIO_MAX:
             flags.append("cheap_multiple")
@@ -345,12 +362,28 @@ class ValueTraps:
         if return_on_capital < VALUE_TRAP_RETURN_ON_CAPITAL_MIN:
             flags.append("weak_returns_on_capital")
 
+        if ticker:
+            try:
+                transcript_commentary = fetch_earnings_call_risk_commentary(ticker)
+            except Exception:
+                transcript_commentary = ""
+
+        normalized_commentary = transcript_commentary.lower()
+        if normalized_commentary:
+            if any(token in normalized_commentary for token in ("temporary", "challenging", "headwind", "headwinds")):
+                flags.append("management_flags_headwinds")
+            if any(token in normalized_commentary for token in ("debt", "refinancing", "liquidity", "covenant")):
+                flags.append("management_flags_balance_sheet_risk")
+
         is_value_trap = "cheap_multiple" in flags and len(flags) >= VALUE_TRAP_FLAG_COUNT_MIN
-        return {
+        result = {
             "is_value_trap": is_value_trap,
             "risk_flags": flags,
             "flag_count": len(flags)
         }
+        if transcript_commentary:
+            result["earnings_call_risk_commentary"] = transcript_commentary
+        return result
 
     def _helper_method(self):
         """
@@ -367,13 +400,21 @@ class LeverageRisk:
 
     def evaluate(self, ticker: str) -> dict:
         footnotes = self._fetch_sec_10k_footnotes(ticker)
+        transcript_commentary = fetch_earnings_call_risk_commentary(ticker)
         deterministic = _extract_footnote_risk_signals(footnotes)
         if any(
             deterministic[key] not in ("Not found", "None mentioned")
             for key in ("operating_lease_obligations", "pension_underfunding", "toxic_derivative_exposure")
         ):
+            if transcript_commentary:
+                deterministic["earnings_call_risk_commentary"] = transcript_commentary
             return deterministic
-        analysis = self._analyze_footnotes_with_ollama(footnotes)
+        combined_text = footnotes
+        if transcript_commentary:
+            combined_text = f"SEC 10-K Footnotes:\n{footnotes}\n\nRelevant Earnings Call Commentary:\n{transcript_commentary}"
+        analysis = self._analyze_footnotes_with_ollama(combined_text)
+        if analysis and transcript_commentary:
+            analysis["earnings_call_risk_commentary"] = transcript_commentary
         return analysis if analysis else {}
 
     def _fetch_sec_10k_footnotes(self, ticker: str) -> str:
@@ -382,7 +423,7 @@ class LeverageRisk:
     def _analyze_footnotes_with_ollama(self, footnotes_text: str) -> dict:
         prompt = f"""Analyze footnotes. Return JSON with 'operating_lease_obligations', 'pension_underfunding', 'toxic_derivative_exposure'. Footnotes: {footnotes_text}"""
         try:
-            return normalize_footnote_analysis(call_ollama_panel_json(prompt, model=MODEL_NAME))
+            return normalize_footnote_analysis(call_ollama_panel_json(prompt, model=MODEL_NAME, options={"temperature": DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE}))
         except Exception:
             return {}
 
@@ -468,7 +509,7 @@ class DerivativesRisk:
                 if notional_exposure is None and "not found" not in normalized_summary:
                     prompt = f"Estimate the notional derivative exposure ($ amount) and level 3 assets ratio (0.0 to 1.0) from this footnote summary. If not mentioned, return null. Return ONLY JSON: {{\"notional_exposure\": float or null, \"level_3_assets_ratio\": float or null}}. Text: {toxic_summary}"
                     try:
-                        res = call_ollama_panel_json(prompt, model=MODEL_NAME)
+                        res = call_ollama_panel_json(prompt, model=MODEL_NAME, options={"temperature": DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE})
                         notional_exposure = res.get("notional_exposure")
                         level_3_assets_ratio = res.get("level_3_assets_ratio")
                     except Exception:

@@ -1,6 +1,9 @@
+import json
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -123,6 +126,30 @@ class TestRunPipeline(unittest.TestCase):
         self.assertEqual(context["net_debt"], 150.0)
         self.assertEqual(context["debt_to_equity"], 0.8)
         self.assertEqual(context["gross_margin"], 0.42)
+
+    def test_is_complete_analysis_detects_crash_truncated_file(self):
+        categories = list(run.get_all_heuristic_classes())
+        self.assertGreater(len(categories), 1, "sanity: expected multiple heuristic categories")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            complete_path = Path(tmp_dir) / "COMPLETE_analysis.json"
+            complete_path.write_text(json.dumps({c: {} for c in categories}))
+            self.assertTrue(run._is_complete_analysis(complete_path))
+
+            # Simulates exactly what GOOGL_analysis.json looked like after a
+            # mid-run crash: only the categories reached before the crash
+            # are present as keys at all.
+            truncated_path = Path(tmp_dir) / "TRUNCATED_analysis.json"
+            truncated_path.write_text(json.dumps({categories[0]: {}}))
+            self.assertFalse(run._is_complete_analysis(truncated_path))
+
+            missing_path = Path(tmp_dir) / "MISSING_analysis.json"
+            self.assertFalse(run._is_complete_analysis(missing_path))
+
+            corrupt_path = Path(tmp_dir) / "CORRUPT_analysis.json"
+            corrupt_path.write_text("{not valid json")
+            self.assertFalse(run._is_complete_analysis(corrupt_path))
+
 
 if __name__ == "__main__":
     unittest.main()
