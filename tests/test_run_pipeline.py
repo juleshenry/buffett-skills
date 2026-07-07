@@ -14,6 +14,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../s
 import run
 
 
+class _StubCompleteHeuristic:
+    """Heuristic: stub complete"""
+
+    def evaluate(self, ticker=""):
+        return {"status": f"complete:{ticker}"}
+
+
+class _StubMissingHeuristic:
+    """Heuristic: stub missing"""
+
+    def evaluate(self, ticker=""):
+        return {"status": f"filled:{ticker}"}
+
+
 class TestRunPipeline(unittest.TestCase):
     def test_prepare_evaluator_inputs_marks_market_forecasting_forecast_as_missing(self):
         class MarketForecasting:
@@ -128,19 +142,35 @@ class TestRunPipeline(unittest.TestCase):
         self.assertEqual(context["gross_margin"], 0.42)
 
     def test_is_complete_analysis_detects_crash_truncated_file(self):
-        categories = list(run.get_all_heuristic_classes())
+        heuristic_classes = run.get_all_heuristic_classes()
+        categories = list(heuristic_classes)
         self.assertGreater(len(categories), 1, "sanity: expected multiple heuristic categories")
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             complete_path = Path(tmp_dir) / "COMPLETE_analysis.json"
-            complete_path.write_text(json.dumps({c: {} for c in categories}))
+            complete_path.write_text(
+                json.dumps(
+                    {
+                        category: {cls.__name__: {"status": "done"} for cls in class_list}
+                        for category, class_list in heuristic_classes.items()
+                    }
+                )
+            )
             self.assertTrue(run._is_complete_analysis(complete_path))
 
             # Simulates exactly what GOOGL_analysis.json looked like after a
             # mid-run crash: only the categories reached before the crash
             # are present as keys at all.
             truncated_path = Path(tmp_dir) / "TRUNCATED_analysis.json"
-            truncated_path.write_text(json.dumps({categories[0]: {}}))
+            truncated_path.write_text(
+                json.dumps(
+                    {
+                        categories[0]: {
+                            heuristic_classes[categories[0]][0].__name__: {"status": "done"}
+                        }
+                    }
+                )
+            )
             self.assertFalse(run._is_complete_analysis(truncated_path))
 
             missing_path = Path(tmp_dir) / "MISSING_analysis.json"
@@ -149,6 +179,70 @@ class TestRunPipeline(unittest.TestCase):
             corrupt_path = Path(tmp_dir) / "CORRUPT_analysis.json"
             corrupt_path.write_text("{not valid json")
             self.assertFalse(run._is_complete_analysis(corrupt_path))
+
+    @patch("run.get_all_heuristic_classes")
+    def test_is_complete_analysis_detects_missing_evaluator_key_inside_existing_category(self, mock_classes):
+        mock_classes.return_value = {"stub_module": [_StubCompleteHeuristic, _StubMissingHeuristic]}
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            partial_path = Path(tmp_dir) / "PARTIAL_analysis.json"
+            partial_path.write_text(json.dumps({"stub_module": {"_StubCompleteHeuristic": {"status": "ok"}}}))
+            self.assertFalse(run._is_complete_analysis(partial_path))
+
+            complete_path = Path(tmp_dir) / "COMPLETE_analysis.json"
+            complete_path.write_text(
+                json.dumps(
+                    {
+                        "stub_module": {
+                            "_StubCompleteHeuristic": {"status": "ok"},
+                            "_StubMissingHeuristic": {"status": "ok"},
+                        }
+                    }
+                )
+            )
+            self.assertTrue(run._is_complete_analysis(complete_path))
+
+    @patch("run._build_real_context")
+    @patch("run.get_all_heuristic_classes")
+    def test_analyze_company_preserves_existing_evaluator_results_and_only_fills_missing_keys(self, mock_classes, mock_context):
+        mock_classes.return_value = {"stub_module": [_StubCompleteHeuristic, _StubMissingHeuristic]}
+        mock_context.return_value = {
+            "company_name": "Test Co",
+            "sector": "Test Sector",
+            "industry": "Test Industry",
+            "description": "Test Description",
+            "display_description": "Test Description",
+            "ticker": "TEST",
+            "tickers": ["TEST"],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_output_dir = run.OUTPUT_DIR
+            run.OUTPUT_DIR = Path(tmp_dir)
+            try:
+                output_path = run.OUTPUT_DIR / "TEST_analysis.json"
+                output_path.write_text(
+                    json.dumps(
+                        {
+                            "ticker": "TEST",
+                            "company_name": "Old Co",
+                            "stub_module": {
+                                "_StubCompleteHeuristic": {"status": "keep-me"}
+                            },
+                        }
+                    )
+                )
+
+                result = run.analyze_company("TEST")
+
+                self.assertEqual(result["stub_module"]["_StubCompleteHeuristic"], {"status": "keep-me"})
+                self.assertEqual(result["stub_module"]["_StubMissingHeuristic"], {"status": "filled:TEST"})
+
+                saved = json.loads(output_path.read_text())
+                self.assertEqual(saved["stub_module"]["_StubCompleteHeuristic"], {"status": "keep-me"})
+                self.assertEqual(saved["stub_module"]["_StubMissingHeuristic"], {"status": "filled:TEST"})
+            finally:
+                run.OUTPUT_DIR = original_output_dir
 
 
 if __name__ == "__main__":

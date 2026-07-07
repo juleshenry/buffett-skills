@@ -414,6 +414,17 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["durability_assessment"], "strong")
         mock_fetch_metrics.assert_called_once_with("AAPL")
 
+    @patch("business_moat.fetch_historical_margins")
+    def test_durability_of_competitive_advantage_handles_missing_margins(self, mock_margins):
+        # Real, observed case: banks/insurers (AFL, AIG, ALL, AXP, BAC, ...)
+        # don't report "Total Revenue"/"Gross Profit" the way yfinance
+        # expects, so fetch_historical_margins legitimately returns an empty
+        # DataFrame. This must produce the same "not applicable" shape every
+        # other evaluator uses for missing data, not raise ValueError.
+        mock_margins.return_value = pd.DataFrame()
+        result = TheDurabilityOfCompetitiveAdvantage().evaluate(ticker="AFL")
+        self.assertEqual(result.get("applicable"), False)
+
     @patch("business_moat.call_ollama_panel_json")
     @patch("business_moat.fetch_moat_commentary")
     @patch("sec_data.fetch_filing_section")
@@ -667,6 +678,22 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertTrue(result["buybacks_below_intrinsic_value"])
         self.assertEqual(result["governance_score"], 3)
         self.assertEqual(result["shareholder_orientation"], "strong")
+
+    @patch("valuation_capital.fetch_management_commentary")
+    @patch("management_governance.fetch_latest_filing_text")
+    @patch("management_governance.yf.Ticker")
+    def test_shareholder_orientation_handles_missing_proxy_filing(self, mock_ticker, mock_proxy_text, mock_commentary):
+        # Real, observed case: some tickers (e.g. BX -- Blackstone) have no
+        # DEF 14A on file the way this fetcher expects. This must produce the
+        # same "not applicable" shape every other evaluator uses for missing
+        # data, not raise ValueError.
+        mock_ticker.return_value.info = {"heldPercentInsiders": 0.05}
+        mock_proxy_text.side_effect = ValueError("No DEF 14A filing found for ticker BX")
+        mock_commentary.return_value = ""
+
+        result = CorporateGovernanceAndShareholderOrientation().evaluate(ticker="BX")
+
+        self.assertEqual(result.get("applicable"), False)
 
     def test_economic_reality(self):
         result = CorePrincipleSeeThroughAccountingToEconomicReality().evaluate(
@@ -994,6 +1021,20 @@ class TestMinimalHeuristics(unittest.TestCase):
         mock_load_cached.return_value = ""
         with self.assertRaises(RuntimeError):
             ManagementEvaluation()._fetch_earnings_call_transcript("YUM")
+
+    @patch("management_governance.ManagementEvaluation._fetch_earnings_call_transcript")
+    def test_management_evaluation_handles_missing_transcript_gracefully(self, mock_fetch_transcript):
+        # Real, observed case: some tickers (GOOG, BRK-B, BF-B) have no
+        # cached or auto-fetchable earnings call transcripts. evaluate()
+        # must catch that and return the same "not applicable" shape every
+        # other evaluator uses for missing data, not let the exception
+        # propagate up to the generic per-evaluator catch in run.py.
+        mock_fetch_transcript.side_effect = RuntimeError(
+            "No cached earnings call transcripts found for GOOG."
+        )
+        result = ManagementEvaluation().evaluate("GOOG")
+        self.assertEqual(result.get("applicable"), False)
+        self.assertIn("No cached earnings call transcripts", result.get("reason", ""))
 
     @patch("management_governance.load_cached_transcript_text")
     def test_management_evaluation_reads_cached_transcript(self, mock_load_cached):

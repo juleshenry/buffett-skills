@@ -159,9 +159,15 @@ class ManagementEvaluation:
         self.ollama_model = ollama_model
         self.ollama_host = ollama_host
 
-    def evaluate(self, ticker: str, transcript: Optional[str] = None, proxy_stmt: Optional[str] = None) -> str:
-        transcript = transcript or self._fetch_earnings_call_transcript(ticker)
-        proxy_stmt = proxy_stmt or self._fetch_sec_def_14a(ticker)
+    def evaluate(self, ticker: str, transcript: Optional[str] = None, proxy_stmt: Optional[str] = None):
+        try:
+            transcript = transcript or self._fetch_earnings_call_transcript(ticker)
+            proxy_stmt = proxy_stmt or self._fetch_sec_def_14a(ticker)
+        except Exception as e:
+            # No cached/fetchable earnings call transcript or DEF 14A for this
+            # ticker (e.g. recent spinoffs, some partnership/trust structures)
+            # -- not a bug, just unavailable source material for this evaluator.
+            return {"applicable": False, "reason": str(e)}
 
         prompt = f"""
         You are Warren Buffett analyzing the management of {ticker}. 
@@ -667,8 +673,14 @@ class CorporateGovernanceAndShareholderOrientation:
         ticker: str = "",
     ) -> dict:
         if ticker and any(value is None for value in (insider_ownership, roic_linked_pay, dual_class_structure, buybacks_below_intrinsic_value)):
-            proxy_text = self._fetch_proxy_text(ticker)
-            proxy_flags = self._parse_proxy_governance(proxy_text)
+            try:
+                proxy_text = self._fetch_proxy_text(ticker)
+                proxy_flags = self._parse_proxy_governance(proxy_text)
+            except Exception:
+                # No DEF 14A on file for this ticker (e.g. recent spinoffs,
+                # some partnership/trust structures) -- not a bug, just
+                # unavailable. Fall through to the applicable: False check below.
+                proxy_flags = {"roic_linked_pay": None, "dual_class_structure": None}
 
             if insider_ownership is None:
                 insider_ownership = self._fetch_insider_ownership(ticker)
@@ -680,9 +692,10 @@ class CorporateGovernanceAndShareholderOrientation:
                 buybacks_below_intrinsic_value = self._fetch_buyback_orientation(ticker)
 
         if insider_ownership is None or roic_linked_pay is None or dual_class_structure is None or buybacks_below_intrinsic_value is None:
-            raise ValueError(
-                "insider_ownership, roic_linked_pay, dual_class_structure, and buybacks_below_intrinsic_value are required"
-            )
+            return {
+                "applicable": False,
+                "reason": "insider_ownership, roic_linked_pay, dual_class_structure, and buybacks_below_intrinsic_value are required but could not be determined (e.g. no DEF 14A proxy filing available for this ticker)",
+            }
 
         score = 0
         if insider_ownership >= GOVERNANCE_INSIDER_OWNERSHIP_MIN:

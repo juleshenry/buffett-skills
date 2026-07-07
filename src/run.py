@@ -69,6 +69,13 @@ def get_all_heuristic_classes():
     return classes
 
 
+def _get_expected_heuristic_names() -> dict[str, list[str]]:
+    return {
+        mod_name: [cls.__name__ for cls in class_list]
+        for mod_name, class_list in get_all_heuristic_classes().items()
+    }
+
+
 def _make_json_safe(value):
     if isinstance(value, dict):
         return {key: _make_json_safe(item) for key, item in value.items()}
@@ -103,6 +110,16 @@ def _make_json_safe(value):
 def _write_analysis_output(path: Path, data: dict) -> None:
     with path.open("w") as f:
         json.dump(_make_json_safe(data), f, indent=2)
+
+
+def _read_analysis_output(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _build_real_context(ticker: str) -> dict:
@@ -260,7 +277,9 @@ def _prepare_evaluator_inputs(instance, context: dict) -> tuple[dict, list[str]]
 
 
 def analyze_company(ticker: str) -> dict:
-    results = {"ticker": ticker}
+    output_filename = OUTPUT_DIR / f"{ticker}_analysis.json"
+    results = _read_analysis_output(output_filename)
+    results["ticker"] = ticker
 
     logger.info(f"Fetching context data for {ticker}...")
     context = _build_real_context(ticker)
@@ -270,16 +289,18 @@ def analyze_company(ticker: str) -> dict:
     results["industry"] = context.get("industry", "")
     results["description"] = context.get("display_description") or context.get("description", "")
 
-    output_filename = OUTPUT_DIR / f"{ticker}_analysis.json"
     _write_analysis_output(output_filename, results)
 
     heuristic_modules = get_all_heuristic_classes()
 
     for mod_name, class_list in heuristic_modules.items():
-        results[mod_name] = {}
-        _write_analysis_output(output_filename, results)
+        if not isinstance(results.get(mod_name), dict):
+            results[mod_name] = {}
+            _write_analysis_output(output_filename, results)
         for cls in class_list:
             cls_name = cls.__name__
+            if cls_name in results[mod_name]:
+                continue
             logger.info(f"Evaluating {cls_name}...")
             try:
                 instance = cls()
@@ -306,21 +327,26 @@ def analyze_company(ticker: str) -> dict:
 
 
 def _is_complete_analysis(output_filename: Path) -> bool:
-    """A file only counts as "done" if every top-level heuristic category
-    ran. analyze_company() writes incrementally (results[mod_name] = {} is
-    written *before* that category's evaluators run), so a hard crash
-    mid-run (observed: Ollama OOM-kills the whole process, not just one
-    request) leaves a real, parseable, but truncated JSON file on disk --
-    missing whichever categories hadn't started yet. Without this check,
-    run_continuous_all's resume-by-skip treats that file as finished
-    forever. A per-evaluator {"error": ...} is fine and expected; a missing
-    top-level category key is not.
+    """A file only counts as "done" if every expected evaluator key exists.
+
+    analyze_company() writes incrementally: it creates each top-level category
+    before running that category's evaluators, and writes each evaluator result
+    as it completes. So both a hard crash and a deliberate per-evaluator delete
+    should leave the file resumable. A stored {"error": ...} or
+    {"applicable": False, ...} still counts as complete for that evaluator;
+    the missing unit is the evaluator key itself.
     """
-    try:
-        data = json.loads(output_filename.read_text())
-    except (OSError, json.JSONDecodeError):
+    data = _read_analysis_output(output_filename)
+    if not data:
         return False
-    return all(category in data for category in get_all_heuristic_classes())
+
+    for category, evaluator_names in _get_expected_heuristic_names().items():
+        section = data.get(category)
+        if not isinstance(section, dict):
+            return False
+        if any(evaluator_name not in section for evaluator_name in evaluator_names):
+            return False
+    return True
 
 
 def run_continuous_all() -> None:

@@ -92,7 +92,12 @@ def fetch_goodwill_metrics(ticker: str) -> dict:
 def fetch_durability_metrics(ticker: str) -> dict:
     margins_df = fetch_historical_margins(ticker)
     if margins_df.empty:
-        raise ValueError(f"No historical margins available for {ticker}")
+        # Some sectors (banks, insurers) don't report Revenue/Gross Profit the
+        # way yfinance expects (see fetch_historical_margins), so margins are
+        # genuinely unavailable here -- not a bug. Return None metrics so the
+        # caller's existing "missing required metrics" check (evaluate(), below)
+        # reports this as applicable: False instead of crashing.
+        return {"gross_margin_trend": None, "market_share_trend": None, "return_on_capital": None}
 
     sorted_margins = margins_df.sort_values("Year")
     gross_margin_trend = None
