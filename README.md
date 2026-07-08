@@ -125,6 +125,16 @@ Run the test suite with:
 python3 -m unittest discover -s tests
 ```
 
+## Resuming Existing Output
+
+`python3 -m src.run --continuous-all` now resumes at the evaluator level, not just the top-level category level.
+
+- If `output/<TICKER>_analysis.json` is complete, it is skipped.
+- If a specific evaluator key is missing inside an existing category, only that missing evaluator is recomputed.
+- Existing evaluator results in the same JSON file are preserved.
+
+This makes surgical repair passes possible: remove only the stale or broken evaluator keys from an existing output file, then rerun `python3 -m src.run --continuous-all` to fill just those holes instead of recomputing the whole ticker.
+
 Clone this repo and copy the `skills/buffett` folder into your project:
 
 ```bash

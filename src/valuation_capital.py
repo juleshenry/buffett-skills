@@ -528,6 +528,22 @@ class IntrinsicValueEstimation:
         if any(value is None for value in (fcf, growth_rate, discount_rate, shares_outstanding, net_debt)):
             return {"applicable": False, "reason": "Missing required metrics: fcf, growth_rate, discount_rate, shares_outstanding, and net_debt are required"}
 
+        if fcf <= 0:
+            return {
+                "applicable": False,
+                "reason": "Intrinsic value is not meaningful with non-positive free cash flow",
+            }
+        if shares_outstanding <= 0:
+            return {
+                "applicable": False,
+                "reason": "Intrinsic value requires positive shares_outstanding",
+            }
+        if discount_rate <= terminal_growth_rate:
+            return {
+                "applicable": False,
+                "reason": "Intrinsic value requires discount_rate to exceed terminal_growth_rate",
+            }
+
         scenarios = self._build_valuation_scenarios(
             fcf=float(fcf),
             growth_rate=float(growth_rate),
@@ -563,6 +579,13 @@ class IntrinsicValueEstimation:
             result["ticker"] = ticker
         if current_market_price is not None:
             result["market_price"] = current_market_price
+        if value_per_share <= 0:
+            return {
+                "applicable": False,
+                "reason": "Computed intrinsic value is not positive (likely driven by negative or unsuitable free cash flow assumptions)",
+                **({"ticker": ticker} if ticker else {}),
+                **({"market_price": current_market_price} if current_market_price is not None else {}),
+            }
         return result
 
     def _helper_method(self):

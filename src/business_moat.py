@@ -2,6 +2,7 @@ from cache_utils import disk_cache
 import argparse
 import json
 import logging
+import re
 import requests
 import pandas as pd
 import yfinance as yf
@@ -38,6 +39,28 @@ DEFAULT_MODEL = DEFAULT_OLLAMA_MODEL
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _normalize_grounding_tokens(*values: str) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        for token in re.findall(r"[a-zA-Z][a-zA-Z0-9&\-/]{2,}", value or ""):
+            normalized = token.lower().strip("-/'&")
+            if normalized and normalized not in {"the", "and", "for", "with", "from", "into", "that", "this"}:
+                tokens.add(normalized)
+    return tokens
+
+
+def _is_grounded_text(text: str, allowed_tokens: set[str]) -> bool:
+    candidate_tokens = _normalize_grounding_tokens(text)
+    if not candidate_tokens:
+        return False
+
+    unknown_tokens = {
+        token for token in candidate_tokens
+        if token not in allowed_tokens and token not in {"brand", "switching", "costs", "network", "effect", "low", "producer", "commodity", "moat", "pricing", "retention", "competitive", "competition", "customers", "market", "share", "scale", "distribution", "contracts", "insurance", "utility", "utilities", "software", "hardware", "advertising", "search", "cloud", "energy", "renewable", "power", "devices", "services"}
+    }
+    return len(unknown_tokens) <= 6
 
 
 def _get_statement_value(statement, names: tuple[str, ...], column_index: int = 0) -> Optional[float]:
@@ -418,12 +441,15 @@ class EconomicMoat:
 
     def evaluate(self, ticker: str, company_name: str = "", products: list = None, competitors: list = None, model: str = DEFAULT_OLLAMA_MODEL) -> dict:
         company_name = company_name or ticker
+        grounding_values = [company_name, ticker]
         
         context_str = ""
         if products and competitors:
             products_str = ", ".join(products)
             competitors_str = ", ".join(competitors)
             context_str = f"Company Products/Services: {products_str}\nTop 5 Competitors: {competitors_str}"
+            grounding_values.extend(products)
+            grounding_values.extend(competitors)
         else:
             from sec_data import fetch_filing_section
             try:
@@ -435,6 +461,7 @@ class EconomicMoat:
                     max_chars=8000
                 )
                 context_str = f"Business Description from SEC 10-K:\n{description}"
+                grounding_values.append(description)
             except Exception as e:
                 return {"moat_type": "Unknown", "justification": f"Failed to fetch SEC description: {e}"}
 
@@ -443,6 +470,7 @@ class EconomicMoat:
             transcript_commentary = fetch_moat_commentary(ticker)
             if transcript_commentary:
                 transcript_context = f"\n\nRelevant Earnings Call Commentary:\n{transcript_commentary}"
+                grounding_values.append(transcript_commentary)
         except Exception:
             pass
 
@@ -467,7 +495,17 @@ class EconomicMoat:
         }}
         Do not include markdown blocks or any other text outside the JSON.
         """
-        return self._query_ollama_json(prompt, model)
+        result = self._query_ollama_json(prompt, model)
+        justification = result.get("justification", "")
+        moat_type = result.get("moat_type", "")
+        allowed_tokens = _normalize_grounding_tokens(*grounding_values)
+        allowed_tokens.update(_normalize_grounding_tokens(moat_type))
+        if not moat_type or not justification or not _is_grounded_text(justification, allowed_tokens):
+            return {
+                "applicable": False,
+                "reason": "Moat classification could not be grounded in the company context reliably",
+            }
+        return result
 
     def _query_ollama_json(self, prompt: str, model: str) -> dict:
         try:

@@ -41,6 +41,27 @@ def _get_statement_value(statement, labels: tuple[str, ...], column_index: int =
                 return float(value)
     return None
 
+
+def _tokenize_grounding_text(*values: str) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        for token in re.findall(r"[a-zA-Z][a-zA-Z0-9&\-/]{2,}", value or ""):
+            normalized = token.lower().strip("-/'&")
+            if normalized and normalized not in {"the", "and", "for", "with", "from", "into", "that", "this"}:
+                tokens.add(normalized)
+    return tokens
+
+
+def _is_grounded_management_text(text: str, allowed_tokens: set[str]) -> bool:
+    tokens = _tokenize_grounding_text(text)
+    if not tokens:
+        return False
+    unknown = {
+        token for token in tokens
+        if token not in allowed_tokens and token not in {"management", "capital", "allocation", "shareholder", "compensation", "buybacks", "dividends", "acquisitions", "proxy", "transcript", "returns", "reporting", "candor", "honesty", "board", "incentives", "performance", "earnings"}
+    }
+    return len(unknown) <= 8
+
 class ManagementGovernanceAnalyzer:
     """
     Analyzer class to evaluate corporate management and governance.
@@ -186,7 +207,13 @@ class ManagementEvaluation:
         """
 
         result = self._call_ollama(prompt, json_format=False)
-        return result.get("response", "Analysis failed.")
+        response = result.get("response", "Analysis failed.")
+        if not _is_grounded_management_text(response, _tokenize_grounding_text(ticker, transcript, proxy_stmt)):
+            return {
+                "applicable": False,
+                "reason": "Management evaluation could not be grounded in the transcript/proxy context reliably",
+            }
+        return response
 
     def _call_ollama(self, prompt: str, json_format: bool = True, timeout: int = 45) -> dict:
         options = {"temperature": DEFAULT_STRUCTURED_EXTRACTION_TEMPERATURE}

@@ -442,6 +442,22 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertIn("Relevant Earnings Call Commentary", prompt)
         self.assertIn("pricing power", prompt)
 
+    @patch("business_moat.call_ollama_panel_json")
+    @patch("business_moat.fetch_moat_commentary")
+    @patch("sec_data.fetch_filing_section")
+    def test_economic_moat_rejects_ungrounded_llm_output(self, mock_fetch_section, mock_fetch_moat_commentary, mock_panel):
+        mock_fetch_section.return_value = "Aflac sells supplemental health and life insurance in Japan and the United States."
+        mock_fetch_moat_commentary.return_value = "Management discussed underwriting margins and distribution partnerships."
+        mock_panel.return_value = {
+            "moat_type": "Network Effect",
+            "justification": "The business grows as more lawyers and clients join the referral marketplace, reinforcing the platform.",
+        }
+
+        result = EconomicMoat().evaluate("AFL")
+
+        self.assertEqual(result.get("applicable"), False)
+        self.assertIn("grounded", result.get("reason", ""))
+
     def test_focus_investing(self):
         result = FocusInvestingPrinciple().evaluate([40.0, 25.0, 15.0, 10.0, 10.0])
         self.assertEqual(result["position_count"], 5)
@@ -537,6 +553,22 @@ class TestMinimalHeuristics(unittest.TestCase):
         result = valuation_capital.IntrinsicValueEstimation().evaluate(ticker="JPM")
 
         self.assertEqual(result, {"applicable": False, "reason": "Missing required metrics: fcf, growth_rate, discount_rate, shares_outstanding, and net_debt are required"})
+
+    def test_intrinsic_value_estimation_rejects_non_positive_free_cash_flow(self):
+        result = valuation_capital.IntrinsicValueEstimation().evaluate(
+            fcf=-100.0,
+            growth_rate=0.05,
+            discount_rate=0.10,
+            terminal_growth_rate=0.02,
+            shares_outstanding=10,
+            net_debt=50.0,
+            years=5,
+        )
+
+        self.assertEqual(
+            result,
+            {"applicable": False, "reason": "Intrinsic value is not meaningful with non-positive free cash flow"},
+        )
 
     @patch("valuation_capital.fetch_current_market_price")
     @patch("valuation_capital.fetch_risk_free_rate")
@@ -1035,6 +1067,21 @@ class TestMinimalHeuristics(unittest.TestCase):
         result = ManagementEvaluation().evaluate("GOOG")
         self.assertEqual(result.get("applicable"), False)
         self.assertIn("No cached earnings call transcripts", result.get("reason", ""))
+
+    @patch("management_governance.ManagementEvaluation._fetch_sec_def_14a")
+    @patch("management_governance.ManagementEvaluation._fetch_earnings_call_transcript")
+    @patch("management_governance.ManagementEvaluation._call_ollama")
+    def test_management_evaluation_rejects_ungrounded_llm_output(self, mock_call_ollama, mock_fetch_transcript, mock_fetch_proxy):
+        mock_fetch_transcript.return_value = "Management discussed underwriting, pricing, and claims reserves."
+        mock_fetch_proxy.return_value = "Executive compensation is tied to ROE and underwriting profitability."
+        mock_call_ollama.return_value = {
+            "response": "Management benefits from marketplace flywheel dynamics as more lawyers and clients join the platform, improving lead generation efficiency."
+        }
+
+        result = ManagementEvaluation().evaluate("AFL")
+
+        self.assertEqual(result.get("applicable"), False)
+        self.assertIn("grounded", result.get("reason", ""))
 
     @patch("management_governance.load_cached_transcript_text")
     def test_management_evaluation_reads_cached_transcript(self, mock_load_cached):

@@ -56,3 +56,11 @@ Device set to use mps:0
 2026-07-06 23:04:21,594 - INFO - Evaluating KeyFinancialMetrics...
 2026-07-06 23:04:21,595 - INFO - Evaluating OwnerEarnings...
 2026-07-06 23:04:21,657 - INFO -   -> [Ollama API] Sending request to http://localhost:11434/api/generate with model 'qwen2.5:7b'
+2026-07-06 23:07:14,608 - INFO -   -> [Ollama API] Received successful response from 'qwen2.5:7b'
+2026-07-06 23:07:24,613 - INFO -   -> [Ollama API] Sending request to http://localhost:11434/api/generate with model 'llama3'
+2026-07-06 23:07:36,537 - INFO -   -> [Ollama API] Received successful response from 'llama3'
+2026-07-06 23:07:46,544 - INFO -   -> [Ollama API] Sending request to http://localhost:11434/api/generate with model 'gemma4:e2b-it-qat'
+2026-07-06 23:08:04,159 - INFO -   -> [Ollama API] Received successful response from 'gemma4:e2b-it-qat'
+2026-07-06 23:08:04,162 - INFO - Evaluating CapitalAllocationAnalysis...
+2026-07-06 23:08:04,162 - INFO -   -> [Ollama API] Sending request to http://localhost:11434/api/generate with model 'qwen2.5:7b'
+2026-07-06 23:08:14,949 - INFO -   -> [Ollama API] Received successful response from 'qwen2.5:7b'
