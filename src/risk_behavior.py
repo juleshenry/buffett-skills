@@ -236,9 +236,11 @@ def normalize_footnote_analysis(result: Dict[str, Any] | None) -> Dict[str, Any]
 
 
 def _get_statement_value(statement, names: tuple[str, ...], column_index: int = 0) -> Optional[float]:
-    if statement is None or getattr(statement, "empty", True):
+    if statement is None or names is None or getattr(statement, "empty", True):
         return None
     for name in names:
+        if name is None:
+            continue
         if name in statement.index:
             value = statement.loc[name].iloc[column_index]
             try:
@@ -399,7 +401,13 @@ class LeverageRisk:
         pass
 
     def evaluate(self, ticker: str) -> dict:
-        footnotes = self._fetch_sec_10k_footnotes(ticker)
+        try:
+            footnotes = self._fetch_sec_10k_footnotes(ticker)
+        except RuntimeError as e:
+            return {
+                "applicable": False,
+                "reason": str(e),
+            }
         transcript_commentary = fetch_earnings_call_risk_commentary(ticker)
         deterministic = _extract_footnote_risk_signals(footnotes)
         if any(
@@ -487,6 +495,8 @@ class DerivativesRisk:
     ) -> dict:
         if ticker and any(value is None for value in (notional_exposure, equity_capital, level_3_assets_ratio)):
             footnote_analysis = LeverageRisk().evaluate(ticker)
+            if footnote_analysis.get("applicable") is False:
+                return footnote_analysis
             toxic_summary = str(footnote_analysis.get("toxic_derivative_exposure") or "").strip()
 
             stock = yf.Ticker(ticker)

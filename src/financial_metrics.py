@@ -290,7 +290,13 @@ class OwnerEarnings:
 
     def evaluate(self, ticker: str) -> dict:
         financials = self._fetch_deep_financials(ticker)
-        mda_text = self._fetch_mda_section(ticker)
+        try:
+            mda_text = self._fetch_mda_section(ticker)
+        except RuntimeError as e:
+            return {
+                "applicable": False,
+                "reason": str(e),
+            }
         capex_breakdown = self._query_ollama_capex_breakdown(mda_text)
         
         net_income = financials.get("net_income") or 0

@@ -869,6 +869,150 @@ def _build_category_diagnostics(metrics: list[dict]) -> dict:
     return diagnostics
 
 
+def _section_is_grounded(section) -> bool:
+    if isinstance(section, dict):
+        return section.get("applicable") is not False
+    return isinstance(section, str) and bool(section.strip())
+
+
+def _compute_quality_overlay(company: dict, packet: dict) -> dict:
+    reasons = []
+    bonus_reasons = []
+    penalty = 0.0
+    bonus = 0.0
+
+    thinking = company.get("thinking_frameworks") or {}
+    circle = thinking.get("CircleOfCompetence") or {}
+    inside_circle = circle.get("inside_circle")
+
+    business_moat = company.get("business_moat") or {}
+    economic_moat = business_moat.get("EconomicMoat") or {}
+    durability = business_moat.get("TheDurabilityOfCompetitiveAdvantage") or {}
+
+    management = company.get("management_governance") or {}
+    management_eval = management.get("ManagementEvaluation")
+    governance = management.get("CorporateGovernanceAndShareholderOrientation") or {}
+
+    valuation_capital = company.get("valuation_capital") or {}
+    capital_allocation = valuation_capital.get("CapitalAllocationAnalysis") or {}
+
+    investment = company.get("investment_philosophy") or {}
+    margin_of_safety = investment.get("UndervaluedMarginOfSafety") or {}
+    intrinsic_value = investment.get("IntrinsicValue") or {}
+    valuation_confidence = intrinsic_value.get("valuation_confidence") or {}
+    historical_real_return = investment.get("HistoricalRealReturn") or {}
+
+    if inside_circle is False:
+        penalty += 12.0
+        reasons.append("Outside circle of competence")
+    elif inside_circle is True:
+        bonus += 2.0
+        bonus_reasons.append("Inside circle of competence")
+
+    moat_grounded = _section_is_grounded(economic_moat)
+    if not moat_grounded:
+        penalty += 6.0
+        reasons.append("Moat section ungrounded")
+
+    management_grounded = _section_is_grounded(management_eval)
+    if not management_grounded:
+        penalty += 6.0
+        reasons.append("Management evaluation unavailable or ungrounded")
+
+    durability_grounded = _section_is_grounded(durability)
+    if not durability_grounded:
+        penalty += 4.0
+        reasons.append("Durability section incomplete")
+
+    is_undervalued = margin_of_safety.get("is_undervalued")
+    if is_undervalued is False:
+        penalty += 8.0
+        reasons.append("Fails current margin-of-safety test")
+    elif is_undervalued is True:
+        bonus += 2.0
+        bonus_reasons.append("Passes current margin-of-safety test")
+
+    if valuation_confidence.get("confidence_label") == "low":
+        penalty += 3.0
+        reasons.append("Low valuation confidence")
+
+    beat_inflation = historical_real_return.get("beat_inflation")
+    if beat_inflation is False:
+        penalty += 100.0
+        reasons.append("Failed historical real-return gate")
+
+    if governance.get("shareholder_orientation") == "strong":
+        bonus += 2.0
+        bonus_reasons.append("Strong shareholder orientation")
+
+    if capital_allocation.get("capital_allocation_discipline") == "strong":
+        bonus += 2.0
+        bonus_reasons.append("Strong capital allocation discipline")
+
+    base_score = packet.get("composite_score")
+    adjusted_score = None if base_score is None else _round(_clamp(float(base_score) + bonus - penalty))
+
+    base_confidence = packet.get("confidence_score")
+    adjusted_confidence = base_confidence
+    if base_confidence is not None:
+        adjusted_confidence = float(base_confidence)
+        if not moat_grounded:
+            adjusted_confidence -= 8.0
+        if not management_grounded:
+            adjusted_confidence -= 8.0
+        if not durability_grounded:
+            adjusted_confidence -= 4.0
+        if inside_circle is False:
+            adjusted_confidence -= 5.0
+        if valuation_confidence.get("confidence_label") == "low":
+            adjusted_confidence -= 3.0
+        if beat_inflation is False:
+            adjusted_confidence -= 25.0
+        adjusted_confidence = _round(_clamp(adjusted_confidence))
+
+    major_red_flags = sum(
+        1
+        for flag in (
+            inside_circle is False,
+            not moat_grounded,
+            not management_grounded,
+            is_undervalued is False,
+            beat_inflation is False,
+        )
+        if flag
+    )
+
+    review_label = "questionable"
+    if adjusted_score is not None:
+        if adjusted_score >= 68.0 and major_red_flags <= 1:
+            review_label = "keep"
+        elif adjusted_score < 58.0 or major_red_flags >= 4 or beat_inflation is False:
+            review_label = "reject"
+
+    return {
+        "base_overall_score": base_score,
+        "overall_score_adjustment": _round(bonus - penalty),
+        "composite_score": adjusted_score,
+        "raw_composite_score": adjusted_score,
+        "legacy_confidence_score": packet.get("confidence_score"),
+        "confidence_score": adjusted_confidence,
+        "review_label": review_label,
+        "quality_penalties": reasons,
+        "quality_bonuses": bonus_reasons,
+        "quality_flags": {
+            "inside_circle": inside_circle,
+            "moat_grounded": moat_grounded,
+            "management_grounded": management_grounded,
+            "durability_grounded": durability_grounded,
+            "is_undervalued": is_undervalued,
+            "beat_inflation": beat_inflation,
+            "valuation_confidence_label": valuation_confidence.get("confidence_label"),
+            "shareholder_orientation": governance.get("shareholder_orientation"),
+            "capital_allocation_discipline": capital_allocation.get("capital_allocation_discipline"),
+        },
+    }
+
+
 def _aggregate_company_scores(metrics: list[dict], qualitative: dict) -> dict:
     category_buckets = {}
     category_weight_buckets = {}
@@ -1001,6 +1145,8 @@ def build_comparison(companies: list[dict]) -> dict:
         packet = {
             "ticker": company.get("ticker"),
             "company_name": company.get("company_name") or company.get("ticker"),
+            "sector": company.get("sector") or "",
+            "industry": company.get("industry") or "",
             "qualitative_scores": qualitative,
             "metric_scores": metrics,
         }
@@ -1012,8 +1158,10 @@ def build_comparison(companies: list[dict]) -> dict:
     for packet in company_packets:
         metrics = [metric for metric in all_metrics if metric.get("ticker") == packet["ticker"]]
         packet["metric_scores"] = metrics
+        company = next(company for company in companies if company.get("ticker") == packet["ticker"])
         packet.update(_aggregate_company_scores(metrics, packet.get("qualitative_scores") or {}))
         packet.update(_compute_composite_score(packet))
+        packet.update(_compute_quality_overlay(company, packet))
 
     rankings = _build_rankings(company_packets, "composite_score", raw_score_key="raw_composite_score", coverage_key="composite_score_coverage")
     for ranking in rankings:
@@ -1023,8 +1171,13 @@ def build_comparison(companies: list[dict]) -> dict:
         ranking["raw_overall_score"] = ranking.pop("raw_composite_score")
         ranking["overall_score_coverage"] = ranking.pop("composite_score_coverage")
         ranking["confidence_score"] = packet.get("confidence_score")
+        ranking["legacy_confidence_score"] = packet.get("legacy_confidence_score")
         ranking["legacy_overall_score"] = packet.get("legacy_overall_score")
         ranking["legacy_raw_overall_score"] = packet.get("legacy_raw_overall_score")
+        ranking["base_overall_score"] = packet.get("base_overall_score")
+        ranking["overall_score_adjustment"] = packet.get("overall_score_adjustment")
+        ranking["review_label"] = packet.get("review_label")
+        ranking["quality_penalties"] = packet.get("quality_penalties")
 
     business_quality_rankings = _build_rankings(
         company_packets,

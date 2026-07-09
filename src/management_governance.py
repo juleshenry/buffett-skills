@@ -385,7 +385,14 @@ class CorporateCulture:
 
     def evaluate(self, employee_turnover: float | None = None, insider_ownership: float | None = None, restructurings_per_5y: int | None = None, ticker: str = "") -> dict:
         if ticker and (employee_turnover is None or insider_ownership is None or restructurings_per_5y is None):
-            culture_inputs = self._fetch_culture_inputs(ticker)
+            try:
+                culture_inputs = self._fetch_culture_inputs(ticker)
+            except Exception as e:
+                return {
+                    "ticker": ticker,
+                    "applicable": False,
+                    "reason": str(e),
+                }
             if insider_ownership is None:
                 insider_ownership = culture_inputs["insider_ownership"]
             if employee_turnover is None:

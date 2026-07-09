@@ -77,6 +77,99 @@ def analyze_investment_philosophy(ticker: str, years: int = DEFAULT_LOOKBACK_YEA
     }
 
 
+class HistoricalBenchmarkOutperformance:
+    """
+    Heuristic: Historical Benchmark Outperformance
+    """
+
+    def __init__(self):
+        pass
+
+    def evaluate(
+        self,
+        ticker: str = "",
+        years: int = DEFAULT_LOOKBACK_YEARS,
+        benchmark: str = DEFAULT_BENCHMARK,
+    ) -> dict:
+        if not ticker:
+            return {"applicable": False, "reason": "ticker is required"}
+        return analyze_investment_philosophy(ticker=ticker, years=years, benchmark=benchmark)
+
+
+def analyze_real_return_vs_inflation(ticker: str, years: int = 5) -> dict:
+    from business_moat import fetch_cpi_inflation_data
+
+    end_date = datetime.today()
+    start_date = end_date - relativedelta(years=years)
+
+    prices_raw = yf.download(
+        ticker,
+        start=start_date.strftime('%Y-%m-%d'),
+        end=end_date.strftime('%Y-%m-%d'),
+        progress=False,
+    )
+    if prices_raw.empty:
+        return {"ticker": ticker, "error": "No price data fetched"}
+
+    prices = prices_raw['Close'] if 'Close' in prices_raw else prices_raw
+    if isinstance(prices, pd.DataFrame):
+        if ticker in prices.columns:
+            prices = prices[ticker]
+        else:
+            prices = prices.squeeze()
+
+    prices = prices.dropna()
+    if len(prices) < 2:
+        return {"ticker": ticker, "error": "Insufficient price history"}
+
+    actual_years = (prices.index[-1] - prices.index[0]).days / 365.25
+    if actual_years <= 0:
+        return {"ticker": ticker, "error": "Invalid price history period"}
+
+    stock_cagr = _calculate_cagr(float(prices.iloc[0]), float(prices.iloc[-1]), actual_years)
+
+    start_year = prices.index[0].year
+    end_year = prices.index[-1].year
+    inflation_df = fetch_cpi_inflation_data(start_year, end_year)
+    if inflation_df.empty or "Inflation_Rate" not in inflation_df.columns:
+        return {"ticker": ticker, "error": "No inflation data fetched"}
+
+    inflation_rates = inflation_df["Inflation_Rate"].dropna().astype(float) / 100.0
+    if inflation_rates.empty:
+        return {"ticker": ticker, "error": "Insufficient inflation history"}
+
+    cumulative_inflation = 1.0
+    for rate in inflation_rates:
+        cumulative_inflation *= (1.0 + rate)
+    inflation_cagr = cumulative_inflation ** (1.0 / len(inflation_rates)) - 1.0
+
+    return {
+        "ticker": ticker,
+        "period_years": round(actual_years, 2),
+        "stock_cagr": stock_cagr,
+        "inflation_cagr": inflation_cagr,
+        "beat_inflation": stock_cagr > inflation_cagr,
+    }
+
+
+class HistoricalRealReturn:
+    """
+    Heuristic: Historical Real Return
+    """
+
+    def __init__(self):
+        pass
+
+    def evaluate(
+        self,
+        ticker: str = "",
+        years: int = 5,
+    ) -> dict:
+        if not ticker:
+            return {"applicable": False, "reason": "ticker is required"}
+        return analyze_real_return_vs_inflation(ticker=ticker, years=years)
+
+
 
 if __name__ == "__main__":
     tickers_to_test = ["AOS", "AAPL", "KO"]

@@ -267,16 +267,28 @@ TEMPLATE = """
                         <div class="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-8">
                             <div class="bg-gray-50 rounded-xl border border-gray-200 p-5">
                                 <h4 class="text-lg font-bold text-gray-900 mb-4">Overall Rankings</h4>
+                                <p class="text-xs text-gray-500 mb-4">Confidence bar shows certainty drop-off across the full ranking list.</p>
                                 <div class="space-y-3">
                                     {% for row in comparison.get('rankings', []) %}
+                                    {% set confidence = row.get('confidence_score') %}
+                                    {% if confidence is not none and confidence >= 80 %}
+                                    {% set confidence_bar_class = 'bg-emerald-500' %}
+                                    {% elif confidence is not none and confidence >= 70 %}
+                                    {% set confidence_bar_class = 'bg-amber-500' %}
+                                    {% else %}
+                                    {% set confidence_bar_class = 'bg-rose-500' %}
+                                    {% endif %}
                                     <div class="flex items-center justify-between bg-white rounded-lg border border-gray-200 px-4 py-3">
                                         <div>
-                                            <div class="text-sm font-black text-gray-900">#{{ row.get('rank') }} {{ row.get('ticker') }}</div>
+                                            <div class="text-sm font-black text-gray-900">#{{ row.get('rank') }} <a href="https://finance.yahoo.com/quote/{{ row.get('ticker') }}/" target="_blank" rel="noopener noreferrer" class="text-indigo-700 hover:text-indigo-900 hover:underline">{{ row.get('ticker') }}</a></div>
                                             <div class="text-xs text-gray-500">{{ row.get('company_name') }}</div>
                                         </div>
-                                        <div class="text-right">
+                                        <div class="text-right min-w-32">
                                             <div class="text-sm font-bold text-indigo-700">{{ row.get('overall_score', 'N/A') }}</div>
                                             <div class="text-xs text-gray-500">Confidence {{ row.get('confidence_score', 'N/A') }}</div>
+                                            <div class="mt-2 w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                                                <div class="{{ confidence_bar_class }} h-2 rounded-full" style="width: {{ confidence if confidence is not none else 0 }}%"></div>
+                                            </div>
                                         </div>
                                     </div>
                                     {% endfor %}
@@ -292,7 +304,7 @@ TEMPLATE = """
                                     <div class="flex items-center justify-between bg-white rounded-lg border border-gray-200 px-4 py-3">
                                         <div>
                                             <div class="text-sm font-bold text-gray-900">{{ category | camel_to_spaces | title }}</div>
-                                            <div class="text-xs text-gray-500">Leader: {{ leader.get('ticker') }}</div>
+                                            <div class="text-xs text-gray-500">Leader: <a href="https://finance.yahoo.com/quote/{{ leader.get('ticker') }}/" target="_blank" rel="noopener noreferrer" class="text-indigo-700 hover:text-indigo-900 hover:underline">{{ leader.get('ticker') }}</a></div>
                                         </div>
                                         <div class="text-sm font-bold text-emerald-700">{{ leader.get('score') }}</div>
                                     </div>
@@ -311,7 +323,7 @@ TEMPLATE = """
                                 <div class="bg-gray-50 rounded-xl border border-gray-200 p-5">
                                     <div class="flex items-start justify-between mb-4">
                                         <div>
-                                            <h5 class="text-lg font-black text-gray-900">{{ company.get('ticker') }}</h5>
+                                            <h5 class="text-lg font-black text-gray-900"><a href="https://finance.yahoo.com/quote/{{ company.get('ticker') }}/" target="_blank" rel="noopener noreferrer" class="text-indigo-700 hover:text-indigo-900 hover:underline">{{ company.get('ticker') }}</a></h5>
                                             <p class="text-sm text-gray-500">{{ company.get('company_name') }}</p>
                                         </div>
                                         <div class="text-right text-sm">
@@ -366,7 +378,7 @@ TEMPLATE = """
                                     <tbody>
                                         {% for company in comparison.get('companies', []) %}
                                         <tr class="border-t border-gray-100">
-                                            <td class="px-4 py-3 font-bold text-gray-900">{{ company.get('ticker') }}</td>
+                                            <td class="px-4 py-3 font-bold text-gray-900"><a href="https://finance.yahoo.com/quote/{{ company.get('ticker') }}/" target="_blank" rel="noopener noreferrer" class="text-indigo-700 hover:text-indigo-900 hover:underline">{{ company.get('ticker') }}</a></td>
                                             {% for category in comparison.get('category_rankings', {}).keys() %}
                                             <td class="px-4 py-3 text-gray-700">{{ company.get('category_scores', {}).get(category, 'N/A') }}</td>
                                             {% endfor %}
@@ -749,16 +761,7 @@ def index():
             continue
 
     comparison_reports = {}
-    for file_path in glob.glob(str(OUTPUT_DIR / "*_comparison.json")):
-        comparison_name = os.path.basename(file_path).replace("_comparison.json", "")
-        try:
-            with open(file_path, "r") as f:
-                comparison_reports[comparison_name] = json.load(f)
-        except json.JSONDecodeError as e:
-            print(f"Warning: Could not parse {file_path}. Skipping. Error: {e}")
-            continue
-
-    if reports and not comparison_reports:
+    if reports:
         analyses = list(reports.values())
         comparison_reports["live_compare"] = comparison_scoring.build_comparison(analyses)
 

@@ -203,6 +203,18 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertTrue(result["is_value_trap"])
         mock_fetch_metrics.assert_called_once_with("AAPL")
 
+    @patch("risk_behavior.fetch_value_trap_metrics")
+    def test_value_traps_handles_missing_statement_labels_without_crashing(self, mock_fetch_metrics):
+        mock_fetch_metrics.return_value = {
+            "pe_ratio": 8.0,
+            "revenue_growth": None,
+            "free_cash_flow_growth": None,
+            "debt_to_equity": 1.4,
+            "return_on_capital": 0.05,
+        }
+        result = ValueTraps().evaluate(ticker="PCAR")
+        self.assertFalse(result["applicable"])
+
     @patch("risk_behavior.fetch_earnings_call_risk_commentary")
     def test_value_traps_adds_transcript_risk_flags(self, mock_risk_commentary):
         mock_risk_commentary.return_value = "Management called demand challenging and discussed debt refinancing needs."
@@ -791,6 +803,15 @@ class TestMinimalHeuristics(unittest.TestCase):
         self.assertEqual(result["depreciation_amortization_estimate"], 0)
         self.assertEqual(result["depreciation_amortization_source"], "ocf_minus_ni_proxy")
 
+    @patch.object(OwnerEarnings, "_fetch_mda_section")
+    @patch.object(OwnerEarnings, "_fetch_deep_financials")
+    def test_owner_earnings_handles_missing_10k_as_not_applicable(self, mock_financials, mock_mda):
+        mock_financials.return_value = {"net_income": 10.0, "operating_cash_flow": 12.0, "capex_total": -3.0}
+        mock_mda.side_effect = RuntimeError("Failed to fetch MD&A section for HONA: No 10-K filing found for ticker HONA")
+        result = OwnerEarnings().evaluate("HONA")
+        self.assertFalse(result["applicable"])
+        self.assertIn("No 10-K filing found", result["reason"])
+
     def test_dividends_tax_efficiency(self):
         result = DividendsRetainedEarningsAndTaxEfficiency().evaluate(
             dividend_payout_ratio=0.30,
@@ -835,6 +856,13 @@ class TestMinimalHeuristics(unittest.TestCase):
 
         self.assertFalse(result["applicable"])
         self.assertIn("No material derivative exposure found", result["reason"])
+
+    @patch("risk_behavior.LeverageRisk.evaluate")
+    def test_derivatives_risk_propagates_inapplicable_footnotes(self, mock_leverage_risk):
+        mock_leverage_risk.return_value = {"applicable": False, "reason": "Failed to fetch 10-K footnotes for HONA: No 10-K filing found for ticker HONA"}
+        result = DerivativesRisk().evaluate(ticker="HONA")
+        self.assertFalse(result["applicable"])
+        self.assertIn("No 10-K filing found", result["reason"])
 
     @patch("business_moat.fetch_cpi_inflation_data")
     @patch("business_moat.fetch_historical_margins")
@@ -912,6 +940,13 @@ class TestMinimalHeuristics(unittest.TestCase):
 
         self.assertFalse(result["applicable"])
         self.assertIn("at least one culture proxy", result["reason"])
+
+    @patch.object(CorporateCulture, "_fetch_culture_inputs")
+    def test_corporate_culture_handles_transient_fetch_failure_as_not_applicable(self, mock_fetch_inputs):
+        mock_fetch_inputs.side_effect = RuntimeError("Failed to perform, curl: (28) Operation timed out after 30002 milliseconds with 0 bytes received.")
+        result = CorporateCulture().evaluate(ticker="VZ")
+        self.assertFalse(result["applicable"])
+        self.assertIn("Operation timed out", result["reason"])
 
     def test_acquisition_logic(self):
         result = AcquisitionLogicAcquisitionCriteria().evaluate(
@@ -1161,6 +1196,13 @@ class TestMinimalHeuristics(unittest.TestCase):
         mock_fetch_mda.return_value = "Item 7. Management discussion"
         result = OwnerEarnings()._fetch_mda_section("YUM")
         self.assertEqual(result, "Item 7. Management discussion")
+
+    @patch("risk_behavior.fetch_sec_10k_footnotes")
+    def test_leverage_risk_handles_missing_10k_as_not_applicable(self, mock_fetch):
+        mock_fetch.side_effect = RuntimeError("Failed to fetch 10-K footnotes for FDXF: No 10-K filing found for ticker FDXF")
+        result = LeverageRisk().evaluate("FDXF")
+        self.assertFalse(result["applicable"])
+        self.assertIn("No 10-K filing found", result["reason"])
 
     def test_normalize_capex_breakdown(self):
         normalized = normalize_capex_breakdown({
