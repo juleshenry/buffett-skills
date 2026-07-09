@@ -1,0 +1,20 @@
+$6000 equal basket from todo.txt
+Date: 2026-07-09
+Method: unique tickers only; closest equal-dollar integer-share allocation
+
+Target per position: $600.00
+
+Ticker  Price    Shares  Position Value
+CL      91.77    6       550.62
+ANET    184.16   3       552.48
+ECL     274.76   2       549.52
+CBOE    264.92   2       529.85
+CF      114.38   5       571.90
+CTVA    84.21    7       589.50
+COR     300.90   2       601.80
+CPAY    349.74   2       699.48
+EQT     50.70    12      608.40
+CB      349.98   2       699.97
+
+Total invested: $5953.53
+Cash left: $46.47
